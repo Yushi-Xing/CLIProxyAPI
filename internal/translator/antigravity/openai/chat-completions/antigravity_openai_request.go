@@ -284,7 +284,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					}
 
 					// Collect tool responses scoped to this assistant turn.
-					turnToolResponses := map[string]string{}
+					turnToolResponses := map[string]gjson.Result{}
 					for j := i + 1; j < len(arr); j++ {
 						nextRole := arr[j].Get("role").String()
 						if nextRole == "assistant" {
@@ -293,7 +293,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						if nextRole == "tool" {
 							callID := arr[j].Get("tool_call_id").String()
 							if callID != "" {
-								turnToolResponses[callID] = arr[j].Get("content").String()
+								turnToolResponses[callID] = arr[j].Get("content")
 							}
 						}
 					}
@@ -303,13 +303,16 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						part := []byte(`{"functionResponse":{"id":"","name":""}}`)
 						part, _ = sjson.SetBytes(part, "functionResponse.id", call.id)
 						part, _ = sjson.SetBytes(part, "functionResponse.name", call.name)
-						response := turnToolResponses[call.rawID]
+						response, imageParts := antigravityOpenAIToolResponseContent(turnToolResponses[call.rawID])
 						if response == "" {
 							response = "{}"
 						}
 						// Keep it as a string instead of parsing it into JSON.
 						// Parsing it as JSON, similar to reading a JSON file with readFile, may trigger an upstream 400 error.
 						part, _ = sjson.SetBytes(part, "functionResponse.response.result", response)
+						if len(imageParts) > 0 {
+							part, _ = sjson.SetRawBytes(part, "functionResponse.parts", translatorcommon.JoinRawArray(imageParts))
+						}
 						responseParts = append(responseParts, part)
 					}
 					if len(responseParts) > 0 {
@@ -457,6 +460,36 @@ func antigravityOpenAIInlineDataPart(mimeType, data string, snakeCase bool) []by
 	}
 	part, _ = sjson.SetBytes(part, "inlineData.data", data)
 	return part
+}
+
+// antigravityOpenAIToolResponseContent separates inline images from structured
+// tool output. Keep non-image content serialized as a string, as before, while
+// placing image bytes in functionResponse.parts rather than the text result.
+func antigravityOpenAIToolResponseContent(content gjson.Result) (string, [][]byte) {
+	if !content.IsArray() {
+		return content.String(), nil
+	}
+	nonImageItems := make([][]byte, 0)
+	imageParts := make([][]byte, 0)
+	for _, item := range content.Array() {
+		if item.Get("type").String() == "image_url" {
+			imageURL := item.Get("image_url.url").String()
+			if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData("", "", imageURL); ok && strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+				imageParts = append(imageParts, antigravityOpenAIInlineDataPart(mimeType, data, false))
+				continue
+			}
+		}
+		// Preserve unsupported blocks, including remote image URLs, rather than
+		// fetching them or silently discarding part of the tool result.
+		nonImageItems = append(nonImageItems, []byte(item.Raw))
+	}
+	if len(imageParts) == 0 {
+		return content.String(), nil
+	}
+	if len(nonImageItems) == 0 {
+		return "", imageParts
+	}
+	return string(translatorcommon.JoinRawArray(nonImageItems)), imageParts
 }
 
 func antigravityOpenAIContent(role string, parts [][]byte) []byte {
