@@ -1,0 +1,68 @@
+name: Sync upstream and release
+
+on:
+  schedule:
+    - cron: '23 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'Yushi-Xing/CLIProxyAPI'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Configure merge author
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - name: Test merge safety
+        run: python3 .github/scripts/test-merge-upstream.py
+      - name: Prepare upstream merge
+        id: merge
+        run: bash .github/scripts/merge-upstream.sh
+      - uses: actions/setup-go@v6
+        if: steps.merge.outputs.changed == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate merged code before pushing
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          go test ./internal/translator/antigravity/... ./internal/translator/common -count=1
+          go test ./internal/runtime/executor -run Antigravity -count=1
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$RUNNER_TEMP/cli-proxy-api" ./cmd/server
+          "$RUNNER_TEMP/cli-proxy-api" --help > "$RUNNER_TEMP/cli-proxy-api-help.txt" 2>&1
+      - name: Commit and push validated merge
+        if: steps.merge.outputs.changed == 'true'
+        id: push
+        env:
+          UPSTREAM_REVISION: ${{ steps.merge.outputs.upstream_revision }}
+        run: |
+          git commit -m "chore: merge upstream main (${UPSTREAM_REVISION})"
+          git push origin HEAD:main
+          printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build and publish merged commit
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REVISION: ${{ steps.push.outputs.revision }}
+        run: |
+          gh workflow run fork-release.yml --ref main -f "revision=$REVISION"
+          printf '### Upstream synchronized\n\nCommit: `%s`\n\nRelease build dispatched.\n' "$REVISION" >> "$GITHUB_STEP_SUMMARY"
+      - name: Report no changes
+        if: steps.merge.outputs.changed == 'false'
+        run: echo 'Upstream main is already included; no new release is needed.' >> "$GITHUB_STEP_SUMMARY"

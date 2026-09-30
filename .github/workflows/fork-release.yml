@@ -1,0 +1,111 @@
+name: Fork release (Linux amd64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact commit SHA to validate and release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'Yushi-Xing/CLIProxyAPI'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Validate revision
+        env:
+          REVISION: ${{ inputs.revision }}
+        run: |
+          if [[ ! "$REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "revision must be a full commit SHA" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.revision }}
+          fetch-depth: 0
+      - name: Verify release commit belongs to fork main
+        run: |
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor HEAD origin/main
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run Antigravity regression tests
+        run: |
+          go test ./internal/translator/antigravity/... ./internal/translator/common -count=1
+          go test ./internal/runtime/executor -run Antigravity -count=1
+      - name: Build and package static binary
+        id: build
+        run: |
+          set -euo pipefail
+          revision="$(git rev-parse HEAD)"
+          tag="fork-$(git show -s --format=%cd --date=format:%Y%m%d HEAD)-$(git rev-parse --short=12 HEAD)"
+          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          mkdir -p dist/archive
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false \
+            -ldflags="-s -w -X main.Version=${tag} -X main.Commit=${revision} -X main.BuildDate=${built_at}" \
+            -o dist/archive/cli-proxy-api ./cmd/server
+          if readelf -l dist/archive/cli-proxy-api | grep -q 'Requesting program interpreter'; then
+            echo "static binary must not require a dynamic interpreter" >&2
+            exit 1
+          fi
+          dist/archive/cli-proxy-api --help > "$RUNNER_TEMP/cli-proxy-api-help.txt" 2>&1
+          head -n 1 "$RUNNER_TEMP/cli-proxy-api-help.txt"
+          cp LICENSE README.md README_CN.md config.example.yaml dist/archive/
+          archive="CLIProxyAPI_${tag}_linux_amd64_no-plugin.tar.gz"
+          tar -C dist/archive -czf "dist/$archive" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
+          (cd dist && sha256sum "$archive" > checksums.txt)
+          printf 'tag=%s\nrevision=%s\n' "$tag" "$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64-no-plugin
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          if-no-files-found: error
+      - name: Publish validated release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.build.outputs.tag }}
+          REVISION: ${{ steps.build.outputs.revision }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/fork-release-notes.md"
+          printf 'Linux amd64 static build from commit `%s`.\n\n' "$REVISION" > "$notes"
+          cat >> "$notes" <<'EOF'
+          Includes the fork's Antigravity tool-image fix and any upstream changes merged into this commit.
+
+          Antigravity converter and executor regression tests, compilation, static-link checks, and startup checks passed before publication.
+
+          Download the `linux_amd64_no-plugin.tar.gz` archive and verify it against `checksums.txt`. Dynamic library plugins are not supported. Updating the server remains a manual step.
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            actual_revision="$(git rev-list -n 1 "$TAG")"
+            if [[ "$actual_revision" != "$REVISION" ]]; then
+              echo "existing release tag points to a different commit" >&2
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --target "$REVISION" --title "$TAG" --notes-file "$notes" --draft
+          fi
+          gh release upload "$TAG" dist/*.tar.gz dist/checksums.txt --clobber
+          git fetch origin main --no-tags
+          latest=false
+          if [[ "$(git rev-parse origin/main)" == "$REVISION" ]]; then
+            latest=true
+          fi
+          gh release edit "$TAG" --draft=false --latest="$latest"
+          printf '### Published release\n\nhttps://github.com/%s/releases/tag/%s\n' "$GH_REPO" "$TAG" >> "$GITHUB_STEP_SUMMARY"
