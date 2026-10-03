@@ -14,7 +14,9 @@ and can also be started manually from the Actions tab.
 3. Run Antigravity converter and executor regression tests, build the static
    Linux amd64 server, and check that it starts with `--help`.
 4. Only after all checks pass, commit the merge and push it to this fork.
-5. Explicitly dispatch `Fork release (Linux amd64)` for that exact commit.
+5. Check whether the current commit has a published release with the archive
+   and checksum assets. If it does not, explicitly dispatch
+   `Fork release (Linux amd64)` for that exact commit.
 
 A merge conflict aborts the merge and fails the workflow. A regression or
 build failure prevents the push. A concurrent change to remote `main` causes
@@ -23,18 +25,32 @@ These failures leave the fork's published branch unchanged by the sync job.
 Review the failed Actions run and resolve the conflict manually; no conflict
 is automatically resolved by preferring one side.
 
-No upstream changes means no new build or release. A release-job failure
-does not revert an already validated merge; rerun the release workflow for
-the merged commit after addressing the failure.
+An unchanged upstream still triggers a build when the current fork commit
+has not been released, including after a manual merge. An existing complete
+release skips the build. Drafts or releases missing required assets are
+retried; API failures fail the check instead of being treated as missing
+releases. A release-job failure does not revert an already validated merge;
+rerun either custom workflow after addressing the failure.
 
 ## Releases
 
 `Fork release (Linux amd64)` accepts a full commit SHA that must belong to
 this fork's `main` history. It reruns regression tests, compiles the static
 binary, checks its linkage and startup, and then publishes a release named
-`fork-YYYYMMDD-<commit>`. The asset is
+`vY-MM-DD`, using the last digit of the year and the publication date in
+Asia/Shanghai (for example, `v6-10-04` on October 4, 2026). Further commits
+published on the same day use `v6-10-04-2`, `v6-10-04-3`, and so on. Retries
+reuse the existing tag for the same commit, even after midnight; existing
+tags are never moved to a different commit. Release checks resolve Git tags
+to commit SHAs and also recognize complete releases with the older
+`fork-YYYYMMDD-<commit>` naming scheme. The asset is
 `CLIProxyAPI_<tag>_linux_amd64_no-plugin.tar.gz`, accompanied by `checksums.txt`.
 This build does not support dynamic library plugins.
+
+To release a manually merged commit directly, select `Fork release (Linux
+amd64)` in Actions, click `Run workflow`, select `main`, and enter the full
+40-character commit SHA in `revision`. The upstream `release` workflow is
+tag-triggered and is not this fork's static build workflow.
 
 The workflow uses `GITHUB_TOKEN` and does not require a personal access token
 secret. Synchronization explicitly dispatches the release workflow because

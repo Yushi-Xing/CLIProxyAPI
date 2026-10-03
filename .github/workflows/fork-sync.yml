@@ -28,8 +28,10 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-      - name: Test merge safety
-        run: python3 .github/scripts/test-merge-upstream.py
+      - name: Test merge safety and release decisions
+        run: |
+          python3 .github/scripts/test-merge-upstream.py
+          python3 -B .github/scripts/test-fork-release.py
       - name: Prepare upstream merge
         id: merge
         run: bash .github/scripts/merge-upstream.sh
@@ -54,15 +56,23 @@ jobs:
           git commit -m "chore: merge upstream main (${UPSTREAM_REVISION})"
           git push origin HEAD:main
           printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Build and publish merged commit
-        if: steps.merge.outputs.changed == 'true'
+      - name: Check whether current commit needs a release
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          REVISION: ${{ steps.push.outputs.revision }}
+        run: |
+          git fetch origin --tags
+          python3 -B .github/scripts/fork-release.py check
+      - name: Build and publish unreleased commit
+        if: steps.release.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REVISION: ${{ steps.release.outputs.revision }}
         run: |
           gh workflow run fork-release.yml --ref main -f "revision=$REVISION"
-          printf '### Upstream synchronized\n\nCommit: `%s`\n\nRelease build dispatched.\n' "$REVISION" >> "$GITHUB_STEP_SUMMARY"
-      - name: Report no changes
-        if: steps.merge.outputs.changed == 'false'
-        run: echo 'Upstream main is already included; no new release is needed.' >> "$GITHUB_STEP_SUMMARY"
+          printf '### Release build dispatched\n\nCommit: `%s`\n\nThe release workflow will validate this commit before publication.\n' "$REVISION" >> "$GITHUB_STEP_SUMMARY"
+      - name: Report already published
+        if: steps.release.outputs.needed == 'false'
+        run: echo 'Current commit already has a complete published release; no build is needed.' >> "$GITHUB_STEP_SUMMARY"
