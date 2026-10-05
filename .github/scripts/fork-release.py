@@ -16,7 +16,11 @@ LEGACY_TAG = re.compile(r"fork-\d{8}-[0-9a-f]{12,40}$")
 
 def complete(release):
     tag = release["tag_name"]
-    required = {f"CLIProxyAPI_{tag}_linux_amd64_no-plugin.tar.gz", "checksums.txt"}
+    required = {
+        f"CLIProxyAPI_{tag}_linux_amd64.tar.gz",
+        f"CLIProxyAPI_{tag}_linux_amd64_no-plugin.tar.gz",
+        "checksums.txt",
+    }
     assets = {asset["name"] for asset in release.get("assets", [])}
     return not release["draft"] and required <= assets
 

@@ -45,8 +45,12 @@ jobs:
         run: |
           go test ./internal/translator/antigravity/... ./internal/translator/common -count=1
           go test ./internal/runtime/executor -run Antigravity -count=1
+          CGO_ENABLED=1 go test ./internal/pluginhost -count=1
+          CGO_ENABLED=1 go test ./internal/api -run '^TestManagementResponseExposesPluginSupportHeaderForCORS$' -count=1
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$RUNNER_TEMP/cli-proxy-api" ./cmd/server
           "$RUNNER_TEMP/cli-proxy-api" --help > "$RUNNER_TEMP/cli-proxy-api-help.txt" 2>&1
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o "$RUNNER_TEMP/cli-proxy-api-plugin" ./cmd/server
+          "$RUNNER_TEMP/cli-proxy-api-plugin" --help > "$RUNNER_TEMP/cli-proxy-api-plugin-help.txt" 2>&1
       - name: Commit and push validated merge
         if: steps.merge.outputs.changed == 'true'
         id: push

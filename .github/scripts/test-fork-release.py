@@ -29,6 +29,7 @@ class ReleaseTests(unittest.TestCase):
             "tag_name": tag, "draft": draft,
             "assets": [{"name": name} for name in (
                 assets if assets is not None else [
+                    f"CLIProxyAPI_{tag}_linux_amd64.tar.gz",
                     f"CLIProxyAPI_{tag}_linux_amd64_no-plugin.tar.gz", "checksums.txt"
                 ]
             )],
@@ -82,6 +83,18 @@ class ReleaseTests(unittest.TestCase):
                 self.assertFalse(helper.already_released(
                     [self.release(assets=assets)], {"v6-10-04": self.revision}, self.revision
                 ))
+
+    def test_static_only_release_requires_plugin_build(self):
+        assets = ["CLIProxyAPI_v6-10-04_linux_amd64_no-plugin.tar.gz", "checksums.txt"]
+        self.assertFalse(helper.already_released(
+            [self.release(assets=assets)], {"v6-10-04": self.revision}, self.revision
+        ))
+
+    def test_plugin_only_release_requires_static_build(self):
+        assets = ["CLIProxyAPI_v6-10-04_linux_amd64.tar.gz", "checksums.txt"]
+        self.assertFalse(helper.already_released(
+            [self.release(assets=assets)], {"v6-10-04": self.revision}, self.revision
+        ))
 
     def test_target_commitish_cannot_override_real_tag(self):
         release = {**self.release(), "target_commitish": self.revision}

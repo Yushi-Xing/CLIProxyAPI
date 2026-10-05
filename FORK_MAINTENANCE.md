@@ -11,11 +11,12 @@ and can also be started manually from the Actions tab.
 
 1. Fetch `router-for-me/CLIProxyAPI`'s `main` branch.
 2. Prepare a merge without committing or pushing it.
-3. Run Antigravity converter and executor regression tests, build the static
-   Linux amd64 server, and check that it starts with `--help`.
+3. Run Antigravity converter and executor regression tests, plugin host and
+   management support-header tests, build both Linux amd64 variants, and
+   check that they start with `--help`.
 4. Only after all checks pass, commit the merge and push it to this fork.
-5. Check whether the current commit has a published release with the archive
-   and checksum assets. If it does not, explicitly dispatch
+5. Check whether the current commit has a published release with both build
+   archives and the checksum asset. If it does not, explicitly dispatch
    `Fork release (Linux amd64)` for that exact commit.
 
 A merge conflict aborts the merge and fails the workflow. A regression or
@@ -35,17 +36,25 @@ rerun either custom workflow after addressing the failure.
 ## Releases
 
 `Fork release (Linux amd64)` accepts a full commit SHA that must belong to
-this fork's `main` history. It reruns regression tests, compiles the static
-binary, checks its linkage and startup, and then publishes a release named
+this fork's `main` history. It reruns regression tests, compiles both Linux
+builds, checks their linkage and startup, and then publishes a release named
 `vY-MM-DD`, using the last digit of the year and the publication date in
 Asia/Shanghai (for example, `v6-10-04` on October 4, 2026). Further commits
 published on the same day use `v6-10-04-2`, `v6-10-04-3`, and so on. Retries
 reuse the existing tag for the same commit, even after midnight; existing
 tags are never moved to a different commit. Release checks resolve Git tags
 to commit SHAs and also recognize complete releases with the older
-`fork-YYYYMMDD-<commit>` naming scheme. The asset is
-`CLIProxyAPI_<tag>_linux_amd64_no-plugin.tar.gz`, accompanied by `checksums.txt`.
-This build does not support dynamic library plugins.
+`fork-YYYYMMDD-<commit>` naming scheme. The assets are the following two
+archives, accompanied by `checksums.txt`:
+
+- `CLIProxyAPI_<tag>_linux_amd64.tar.gz`: standard build with dynamic library
+  plugin support. It is built with CGO in the upstream manylinux2014 image
+  and checked against a GLIBC 2.17 baseline. Use this for the plugin marketplace.
+- `CLIProxyAPI_<tag>_linux_amd64_no-plugin.tar.gz`: portable static build for
+  systems without compatible GLIBC. It does not support dynamic library plugins.
+
+The plugin-enabled build runs plugin host and management support-header tests.
+A release missing either build is incomplete and will be retried by synchronization.
 
 To release a manually merged commit directly, select `Fork release (Linux
 amd64)` in Actions, click `Run workflow`, select `main`, and enter the full

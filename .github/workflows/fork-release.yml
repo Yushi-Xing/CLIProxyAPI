@@ -59,6 +59,10 @@ jobs:
         run: |
           go test ./internal/translator/antigravity/... ./internal/translator/common -count=1
           go test ./internal/runtime/executor -run Antigravity -count=1
+      - name: Check plugin host and management support header
+        run: |
+          CGO_ENABLED=1 go test ./internal/pluginhost -count=1
+          CGO_ENABLED=1 go test ./internal/api -run '^TestManagementResponseExposesPluginSupportHeaderForCORS$' -count=1
       - name: Build and package static binary
         id: build
         env:
@@ -83,9 +87,28 @@ jobs:
           tar -C dist/archive -czf "dist/$archive" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
           (cd dist && sha256sum "$archive" > checksums.txt)
           printf 'tag=%s\nrevision=%s\n' "$tag" "$revision" >> "$GITHUB_OUTPUT"
+      - name: Build and package plugin-enabled binary (GLIBC 2.17)
+        env:
+          TAG: ${{ steps.build.outputs.tag }}
+          REVISION: ${{ steps.build.outputs.revision }}
+          WORKFLOW_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Tooling comes from this workflow even when building an older commit.
+          git show "$WORKFLOW_REVISION:.github/scripts/build-fork-plugin-linux.sh" > "$RUNNER_TEMP/build-fork-plugin-linux.sh"
+          export BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          docker run --rm \
+            -v "$PWD:/src" -w /src \
+            -v "$(go env GOROOT):/usr/local/go:ro" \
+            -v "$(go env GOMODCACHE):/go/pkg/mod" \
+            -v "$RUNNER_TEMP/build-fork-plugin-linux.sh:/build-fork-plugin-linux.sh:ro" \
+            -e TAG -e REVISION -e BUILD_DATE \
+            quay.io/pypa/manylinux2014_x86_64 \
+            bash /build-fork-plugin-linux.sh
+          (cd dist && sha256sum CLIProxyAPI_*.tar.gz > checksums.txt)
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-amd64-no-plugin
+          name: linux-amd64
           path: |
             dist/*.tar.gz
             dist/checksums.txt
@@ -99,13 +122,16 @@ jobs:
         run: |
           set -euo pipefail
           notes="$RUNNER_TEMP/fork-release-notes.md"
-          printf 'Linux amd64 static build from commit `%s`.\n\n' "$REVISION" > "$notes"
+          printf 'Linux amd64 builds from commit `%s`.\n\n' "$REVISION" > "$notes"
           cat >> "$notes" <<'EOF'
           Includes the fork's Antigravity tool-image fix and any upstream changes merged into this commit.
 
-          Antigravity converter and executor regression tests, compilation, static-link checks, and startup checks passed before publication.
+          Antigravity converter and executor regression tests, plugin host tests, management support-header checks, compilation, linkage checks, and startup checks passed before publication.
 
-          Download the `linux_amd64_no-plugin.tar.gz` archive and verify it against `checksums.txt`. Dynamic library plugins are not supported. Updating the server remains a manual step.
+          - `linux_amd64.tar.gz`: standard build with dynamic library plugin support and a GLIBC 2.17 baseline. Choose this build to use the plugin marketplace.
+          - `linux_amd64_no-plugin.tar.gz`: static build for systems without compatible GLIBC. Dynamic library plugins are not supported.
+
+          Verify your archive against `checksums.txt`. Updating the server remains a manual step.
           EOF
           if gh release view "$TAG" >/dev/null 2>&1; then
             actual_revision="$(git rev-list -n 1 "$TAG")"
