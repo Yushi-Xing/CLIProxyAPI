@@ -112,7 +112,10 @@ func TestConvertOpenAIRequestToAntigravityToolImages(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			input := toolImageRequest(tt.content)
-			out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", input, false)
+			out, err := ConvertOpenAIRequestToAntigravity("gemini-3-flash", input, false)
+			if err != nil {
+				t.Fatalf("ConvertOpenAIRequestToAntigravity: %v", err)
+			}
 			response := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse")
 			if got := response.Get("id").String(); got != "call_image" {
 				t.Fatalf("functionResponse.id = %q, want call_image", got)
@@ -154,7 +157,10 @@ func TestConvertOpenAIRequestToAntigravityToolImagesStayScopedToCallAndTurn(t *t
 		{"role":"assistant","tool_calls":[{"id":"call_shared","type":"function","function":{"name":"third_image","arguments":"{}"}}]},
 		{"role":"tool","tool_call_id":"call_shared","content":[{"type":"image_url","image_url":{"url":"data:image/webp;base64,dGhpcmQ="}}]}
 	]}`)
-	out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", input, false)
+	out, err := ConvertOpenAIRequestToAntigravity("gemini-3-flash", input, false)
+	if err != nil {
+		t.Fatalf("ConvertOpenAIRequestToAntigravity: %v", err)
+	}
 	contents := gjson.GetBytes(out, "request.contents").Array()
 	if len(contents) != 5 {
 		t.Fatalf("contents count = %d, want 5", len(contents))
@@ -191,7 +197,10 @@ func TestConvertOpenAIRequestToAntigravityLargeToolImageIsNotText(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", toolImageRequest(string(content)), false)
+	out, err := ConvertOpenAIRequestToAntigravity("gemini-3-flash", toolImageRequest(string(content)), false)
+	if err != nil {
+		t.Fatalf("ConvertOpenAIRequestToAntigravity: %v", err)
+	}
 	response := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse")
 	if got := response.Get("response.result").String(); got != "{}" {
 		t.Fatalf("image-only result contains %d text bytes, want empty fallback", len(got))
