@@ -103,7 +103,16 @@ type StreamingConfig struct {
 	// <= 0 disables keep-alives. Default is 0.
 	KeepAliveSeconds int `yaml:"keepalive-seconds,omitempty" json:"keepalive-seconds,omitempty"`
 
-	// BootstrapRetries controls how many times the server may retry a streaming request before any bytes are sent,
+	// KeepAliveBeforeFirstChunk enables HTTP SSE heartbeats while execution and
+	// the first model output are still pending. Requires KeepAliveSeconds > 0.
+	KeepAliveBeforeFirstChunk bool `yaml:"keepalive-before-first-chunk,omitempty" json:"keepalive-before-first-chunk,omitempty"`
+
+	// FirstChunkTimeoutSeconds bounds the wait for the first model output across
+	// bootstrap retries. Unset or non-positive values use 360 seconds. This is
+	// not a deadline for the remainder of generation.
+	FirstChunkTimeoutSeconds int `yaml:"first-chunk-timeout-seconds,omitempty" json:"first-chunk-timeout-seconds,omitempty"`
+
+	// BootstrapRetries controls how many times the server may retry a streaming request before model output is sent,
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`

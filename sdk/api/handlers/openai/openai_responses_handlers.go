@@ -721,18 +721,36 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	deliveryCtx, finishDelivery := usage.WithStreamDelivery(context.Background())
 	defer finishDelivery(context.Canceled)
 	cliCtx, cancelExecution := h.GetContextWithCancel(h, c, deliveryCtx)
-	cliCancel := func(err error) {
+	cliCancel := handlers.APIHandlerCancelFunc(func(params ...interface{}) {
+		var err error
+		if len(params) > 0 {
+			err, _ = params[0].(error)
+		}
 		finishDelivery(err)
 		cancelExecution(err)
-	}
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	})
+	cliCtx, startup, cliCancel := h.PrepareHTTPStream(c, cliCtx, cliCancel, "openai-response", true)
+	defer startup.Close()
+	startup.SetErrorWriter(func(msg *interfaces.ErrorMessage) {
+		msg = sanitizeResponsesInitialErrorMessage(msg)
+		status := http.StatusInternalServerError
+		if msg != nil && msg.StatusCode > 0 {
+			status = msg.StatusCode
+		}
+		errText := responsesStreamErrorText(msg, status)
+		if isCodexResponsesClientRequest(c) {
+			chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, 0)
+			_, _ = fmt.Fprintf(c.Writer, "event: response.failed\ndata: %s\n\n", chunk)
+		} else {
+			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", chunk)
+		}
+	})
+	dataChan, upstreamHeaders, errChan := startup.Execute(func(execCtx context.Context) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+		return h.ExecuteStreamWithAuthManager(execCtx, h.HandlerType(), modelName, rawJSON, "")
+	})
 
-	setSSEHeaders := func() {
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
-		c.Header("Access-Control-Allow-Origin", "*")
-	}
+	setSSEHeaders := func() { startup.SetHeaders(upstreamHeaders) }
 	isCodexClient := isCodexResponsesClientRequest(c)
 	failureEvent := "error"
 	if isCodexClient {
@@ -744,6 +762,16 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// Peek at the first complete SSE data frame.
 	for {
 		select {
+		case <-startup.Timeout():
+			errMsg := startup.TimeoutError()
+			h.WriteErrorResponse(c, errMsg)
+			cliCancel(errMsg.Error)
+			return
+		case <-startup.Heartbeats():
+			if errWrite := startup.WriteHeartbeat(); errWrite != nil {
+				cliCancel(errWrite)
+				return
+			}
 		case <-c.Request.Context().Done():
 			cliCancel(c.Request.Context().Err())
 			return
@@ -760,7 +788,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			}
 			if safeErrMsg != nil && framer.dataFrames > 0 {
 				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
 					cliCancel(errWrite)
 					return
@@ -803,7 +830,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 
 				if framer.dataFrames > 0 {
 					setSSEHeaders()
-					handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 					if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
 						cliCancel(errWrite)
 						return
@@ -812,6 +838,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 						cliCancel(errFlush)
 						return
 					}
+					startup.Observe(initialOutput.Bytes())
 					if framer.terminalError != nil {
 						h.logResponsesStreamError(c, framer, framer.terminalError)
 						cliCancel(framer.terminalError.Error)
@@ -844,7 +871,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			}
 
 			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 			if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
 				cliCancel(errWrite)
 				return
@@ -853,6 +879,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				cliCancel(errFlush)
 				return
 			}
+			startup.Observe(initialOutput.Bytes())
 			if framer.terminalError != nil {
 				h.logResponsesStreamError(c, framer, framer.terminalError)
 				cliCancel(framer.terminalError.Error)

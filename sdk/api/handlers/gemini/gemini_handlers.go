@@ -188,18 +188,27 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
+	cliCtx, startup, cliCancel := h.PrepareHTTPStream(c, cliCtx, cliCancel, "gemini", alt == "")
+	defer startup.Close()
+	dataChan, upstreamHeaders, errChan := startup.Execute(func(execCtx context.Context) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+		return h.ExecuteStreamWithAuthManager(execCtx, h.HandlerType(), modelName, rawJSON, alt)
+	})
 
-	setSSEHeaders := func() {
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
-		c.Header("Access-Control-Allow-Origin", "*")
-	}
+	setSSEHeaders := func() { startup.SetHeaders(upstreamHeaders) }
 
 	// Peek at the first chunk
 	for {
 		select {
+		case <-startup.Timeout():
+			errMsg := startup.TimeoutError()
+			h.WriteErrorResponse(c, errMsg)
+			cliCancel(errMsg.Error)
+			return
+		case <-startup.Heartbeats():
+			if errWrite := startup.WriteHeartbeat(); errWrite != nil {
+				cliCancel(errWrite)
+				return
+			}
 		case <-c.Request.Context().Done():
 			cliCancel(c.Request.Context().Err())
 			return
@@ -219,7 +228,7 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
+				if errMsg, hasPendingError := startup.PendingCloseError(errChan); hasPendingError {
 					h.WriteErrorResponse(c, errMsg)
 					if errMsg != nil {
 						cliCancel(errMsg.Error)
@@ -232,7 +241,7 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 				if alt == "" {
 					setSSEHeaders()
 				}
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				startup.SetHeaders(upstreamHeaders)
 				flusher.Flush()
 				cliCancel(nil)
 				return
@@ -242,17 +251,19 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 			if alt == "" {
 				setSSEHeaders()
 			}
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			startup.SetHeaders(upstreamHeaders)
 
-			// Write first chunk
+			// Write the first chunk and observe it only after successful delivery.
+			output := chunk
 			if alt == "" {
-				_, _ = c.Writer.Write([]byte("data: "))
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n\n"))
-			} else {
-				_, _ = c.Writer.Write(chunk)
+				output = []byte(fmt.Sprintf("data: %s\n\n", chunk))
 			}
-			flusher.Flush()
+			if errWrite := startup.WritePayload(output); errWrite != nil {
+				cliCancel(errWrite)
+				return
+			}
+
+			startup.Observe(chunk)
 
 			// Continue
 			h.forwardGeminiStream(c, flusher, alt, func(err error) { cliCancel(err) }, dataChan, errChan)

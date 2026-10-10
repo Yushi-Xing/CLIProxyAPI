@@ -32,6 +32,7 @@ auths/*
 docs/*
 !docs/management-api-v8.md
 !docs/plugin-candidate-filter.md
+!docs/http-stream-startup.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

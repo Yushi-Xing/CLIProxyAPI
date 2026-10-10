@@ -115,6 +115,9 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
 func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
+	if WriteCommittedHTTPStreamError(c, msg) {
+		return
+	}
 	status := http.StatusInternalServerError
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode

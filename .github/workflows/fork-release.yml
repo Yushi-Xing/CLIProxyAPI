@@ -69,6 +69,10 @@ jobs:
           go test ./sdk/pluginapi ./sdk/cliproxy/auth -run 'CandidateFilter|PluginScheduler' -count=1
           CGO_ENABLED=1 go test ./internal/pluginhost -count=1
           CGO_ENABLED=1 go test ./internal/api -run '^TestManagementResponseExposesPluginSupportHeaderForCORS$' -count=1
+      - name: Check HTTP stream startup, cancellation, and accounting
+        run: |
+          go test -race ./sdk/api/handlers/... ./internal/runtime/executor/helps ./internal/httpwire ./internal/api/middleware ./internal/config -count=1
+          go test -race ./test -run '^TestHTTPStreamStartup' -count=1
       - name: Build and package static binary
         id: build
         env:
@@ -112,6 +116,10 @@ jobs:
             quay.io/pypa/manylinux2014_x86_64 \
             bash /build-fork-plugin-linux.sh
           (cd dist && sha256sum CLIProxyAPI_*.tar.gz > checksums.txt)
+      - name: Validate packaged binaries against delayed upstream
+        run: |
+          python3 -B test/http_stream_startup_e2e.py --binary dist/archive/cli-proxy-api
+          python3 -B test/http_stream_startup_e2e.py --binary dist/plugin-archive/cli-proxy-api --long-wait
       - uses: actions/upload-artifact@v4
         with:
           name: linux-amd64

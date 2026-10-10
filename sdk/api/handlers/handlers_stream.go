@@ -142,7 +142,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		chunks = closed
 	}
 	var responseSSEValidator *sseJSONValidationState
-	if responseProtocol == "openai-response" {
+	if validateHTTPStreamSSE(ctx, responseProtocol) {
 		responseSSEValidator = &sseJSONValidationState{}
 	}
 	go func() {
@@ -427,7 +427,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 
 	var responseSSEValidator *sseJSONValidationState
-	if responseProtocol == "openai-response" {
+	if validateHTTPStreamSSE(ctx, responseProtocol) {
 		responseSSEValidator = &sseJSONValidationState{}
 	}
 
@@ -857,6 +857,9 @@ func streamDeliveryCompletion(ctx context.Context, outcome pluginapi.RequestComp
 		return outcome, status, err
 	}
 	deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
+	if failure := firstChunkFailure(ctx); failure != nil {
+		return pluginapi.RequestCompletionFailed, http.StatusGatewayTimeout, failure
+	}
 	if !tracked || (err != nil && !errors.Is(err, context.Canceled)) || outcome == pluginapi.RequestCompletionRejected {
 		return outcome, status, err
 	}

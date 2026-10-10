@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 )
 
@@ -70,6 +71,18 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		return
 	}
 
+	startup := httpStreamStartup(c)
+	timeoutChannel := func() <-chan time.Time {
+		if startup != nil {
+			return startup.Timeout()
+		}
+		return nil
+	}
+	recordFailure := func(msg *interfaces.ErrorMessage) {
+		if startup != nil {
+			startup.recordFailure(msg)
+		}
+	}
 	flush := func() bool {
 		if opts.Flush != nil {
 			if errFlush := opts.Flush(); errFlush != nil {
@@ -77,7 +90,10 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				return false
 			}
 		} else {
-			flusher.Flush()
+			if errFlush := httpwire.FlushResponse(c.Writer); errFlush != nil {
+				cancel(errFlush)
+				return false
+			}
 		}
 		return true
 	}
@@ -87,20 +103,15 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		writeChunk = func([]byte) {}
 	}
 
-	writeKeepAlive := opts.WriteKeepAlive
-	if writeKeepAlive == nil {
-		writeKeepAlive = func() {
-			_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
-		}
-	}
-
 	keepAliveInterval := StreamingKeepAliveInterval(h.Cfg)
 	if opts.KeepAliveInterval != nil {
 		keepAliveInterval = *opts.KeepAliveInterval
 	}
 	var keepAlive *time.Ticker
 	var keepAliveC <-chan time.Time
-	if keepAliveInterval > 0 {
+	if keepAliveInterval > 0 && startup != nil && startup.Heartbeats() != nil {
+		keepAliveC = startup.Heartbeats()
+	} else if keepAliveInterval > 0 {
 		keepAlive = time.NewTicker(keepAliveInterval)
 		defer keepAlive.Stop()
 		keepAliveC = keepAlive.C
@@ -111,6 +122,20 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
+			return
+		case <-timeoutChannel():
+			terminalErr = startup.TimeoutError()
+			if opts.NormalizeTerminalError != nil {
+				terminalErr = opts.NormalizeTerminalError(terminalErr)
+			}
+			recordFailure(terminalErr)
+			if opts.WriteTerminalError != nil {
+				opts.WriteTerminalError(terminalErr)
+			}
+			if !flush() {
+				return
+			}
+			cancel(terminalErr.Error)
 			return
 		case chunk, ok := <-data:
 			if !ok {
@@ -123,10 +148,14 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 						}
 					}
 				}
+				if terminalErr == nil && startup != nil {
+					terminalErr, _ = startup.PendingCloseError(nil)
+				}
 				if terminalErr == nil && opts.CloseError != nil {
 					terminalErr = opts.CloseError()
 				}
 				if terminalErr != nil {
+					recordFailure(terminalErr)
 					if opts.WriteTerminalError != nil {
 						opts.WriteTerminalError(terminalErr)
 					}
@@ -149,6 +178,9 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			if !flush() {
 				return
 			}
+			if startup != nil {
+				startup.Observe(chunk)
+			}
 			if opts.ChunkError != nil {
 				chunkErr := opts.ChunkError()
 				if chunkErr != nil {
@@ -156,6 +188,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 						chunkErr = opts.NormalizeTerminalError(chunkErr)
 					}
 					if chunkErr != nil {
+						recordFailure(chunkErr)
 						cancel(chunkErr.Error)
 					} else {
 						cancel(nil)
@@ -177,6 +210,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				if opts.NormalizeTerminalError != nil {
 					terminalErr = opts.NormalizeTerminalError(terminalErr)
 				}
+				recordFailure(terminalErr)
 				if opts.WriteTerminalError != nil {
 					opts.WriteTerminalError(terminalErr)
 					if !flush() {
@@ -191,7 +225,21 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			cancel(execErr)
 			return
 		case <-keepAliveC:
-			writeKeepAlive()
+			if opts.WriteKeepAlive == nil {
+				if startup != nil {
+					if err := startup.WriteHeartbeat(); err != nil {
+						cancel(err)
+						return
+					}
+					continue
+				}
+				if _, err := c.Writer.Write([]byte(": keep-alive\n\n")); err != nil {
+					cancel(err)
+					return
+				}
+			} else {
+				opts.WriteKeepAlive()
+			}
 			if !flush() {
 				return
 			}

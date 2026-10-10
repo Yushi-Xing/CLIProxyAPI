@@ -506,11 +506,11 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
-	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(errs...))
+	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromContextErrors(ctx, errs...))
 }
 
 func (r *UsageReporter) PublishFailureWithDetail(ctx context.Context, detail usage.Detail, errs ...error) {
-	r.publishWithOutcome(ctx, detail, true, failFromErrors(errs...))
+	r.publishWithOutcome(ctx, detail, true, failFromContextErrors(ctx, errs...))
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -638,6 +638,23 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Fail:                fail,
 		Detail:              detail,
 	}
+}
+
+// Cancellation can carry an explicit gateway timeout from the HTTP consumer.
+// Preserve that failure instead of reporting it as a client disconnect (499).
+func failFromContextErrors(ctx context.Context, errs ...error) usage.Failure {
+	if ctx != nil {
+		cause := context.Cause(ctx)
+		var status interface{ StatusCode() int }
+		if errors.As(cause, &status) && status.StatusCode() == http.StatusGatewayTimeout && errors.Is(cause, context.DeadlineExceeded) {
+			for _, err := range errs {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return failFromErrors(cause)
+				}
+			}
+		}
+	}
+	return failFromErrors(errs...)
 }
 
 func failFromErrors(errs ...error) usage.Failure {

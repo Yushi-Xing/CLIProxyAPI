@@ -168,6 +168,10 @@ func (t *requestLifecycleTracker) complete(outcome pluginapi.RequestCompletionOu
 }
 
 func (t *requestLifecycleTracker) completeError(ctx context.Context, msg *interfaces.ErrorMessage) {
+	if err := firstChunkFailure(ctx); err != nil {
+		t.complete(pluginapi.RequestCompletionFailed, http.StatusGatewayTimeout, err)
+		return
+	}
 	outcome := pluginapi.RequestCompletionFailed
 	if msg != nil && msg.DirectResponse {
 		outcome = pluginapi.RequestCompletionRejected
