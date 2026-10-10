@@ -7,6 +7,11 @@ on:
         description: Exact commit SHA to validate and release
         required: true
         type: string
+      publish:
+        description: Publish a release after validation (false uploads build artifacts only)
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -61,6 +66,7 @@ jobs:
           go test ./internal/runtime/executor -run Antigravity -count=1
       - name: Check plugin host and management support header
         run: |
+          go test ./sdk/pluginapi ./sdk/cliproxy/auth -run 'CandidateFilter|PluginScheduler' -count=1
           CGO_ENABLED=1 go test ./internal/pluginhost -count=1
           CGO_ENABLED=1 go test ./internal/api -run '^TestManagementResponseExposesPluginSupportHeaderForCORS$' -count=1
       - name: Build and package static binary
@@ -114,6 +120,7 @@ jobs:
             dist/checksums.txt
           if-no-files-found: error
       - name: Publish validated release
+        if: inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

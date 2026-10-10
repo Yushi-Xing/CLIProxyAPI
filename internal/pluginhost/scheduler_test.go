@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -308,4 +309,32 @@ func schedulerRequest(ids ...string) pluginapi.SchedulerPickRequest {
 		req.Candidates = append(req.Candidates, pluginapi.SchedulerAuthCandidate{ID: id})
 	}
 	return req
+}
+
+func TestHostSchedulerCandidateFilter(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		response pluginapi.SchedulerPickResponse
+		invalid  bool
+	}{
+		{name: "authorized subset", response: pluginapi.SchedulerPickResponse{Handled: true, AllowedAuthIDs: []string{"auth-a"}}},
+		{name: "deny all", response: pluginapi.SchedulerPickResponse{Handled: true, AllowedAuthIDs: []string{}}},
+		{name: "unknown id", response: pluginapi.SchedulerPickResponse{Handled: true, AllowedAuthIDs: []string{"missing"}}, invalid: true},
+		{name: "unhandled restriction", response: pluginapi.SchedulerPickResponse{AllowedAuthIDs: []string{"auth-a"}}, invalid: true},
+		{name: "ambiguous selection", response: pluginapi.SchedulerPickResponse{Handled: true, AllowedAuthIDs: []string{"auth-a"}, AuthID: "auth-b"}, invalid: true},
+		{name: "ambiguous delegate", response: pluginapi.SchedulerPickResponse{Handled: true, AllowedAuthIDs: []string{"auth-a"}, DelegateBuiltin: pluginapi.SchedulerBuiltinFillFirst}, invalid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := newHostWithRecords(capabilityRecord{id: "scheduler", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return test.response, nil
+			})}}})
+			response, handled, err := host.PickAuth(context.Background(), schedulerRequest("auth-a", "auth-b"))
+			if !handled || (err != nil) != test.invalid {
+				t.Fatalf("handled=%v, err=%v", handled, err)
+			}
+			if !test.invalid && !reflect.DeepEqual(response.AllowedAuthIDs, test.response.AllowedAuthIDs) {
+				t.Fatalf("response=%+v", response)
+			}
+		})
+	}
 }

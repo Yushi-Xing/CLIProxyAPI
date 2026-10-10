@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"context"
+	"net/http"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -18,13 +19,19 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 	if errPick != nil || !handled {
 		return resp, handled, errPick
 	}
-	if !resp.Handled {
+	if !resp.Handled && resp.AllowedAuthIDs == nil {
 		return pluginapi.SchedulerPickResponse{}, false, nil
 	}
 
 	resp, valid, reason := normalizeSchedulerResponse(resp, req)
 	if !valid {
 		log.WithField("plugin_id", record.id).Warnf("pluginhost: scheduler returned invalid response: %s", reason)
+		if resp.AllowedAuthIDs != nil {
+			return pluginapi.SchedulerPickResponse{}, true, rpcError{
+				Code: "invalid_scheduler_filter", message: "invalid scheduler candidate filter: " + reason,
+				statusCode: http.StatusServiceUnavailable,
+			}
+		}
 		return pluginapi.SchedulerPickResponse{}, false, nil
 	}
 	return resp, true, nil
@@ -91,6 +98,12 @@ func normalizeSchedulerResponse(resp pluginapi.SchedulerPickResponse, req plugin
 		}
 		if resp.RejectReason == "" {
 			resp.RejectReason = "scheduler rejected candidate selection"
+		}
+		return resp, true, ""
+	}
+	if resp.AllowedAuthIDs != nil {
+		if errValidate := pluginapi.ValidateSchedulerCandidateFilter(resp, req.Candidates); errValidate != nil {
+			return resp, false, errValidate.Error()
 		}
 		return resp, true, ""
 	}

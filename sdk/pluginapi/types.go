@@ -498,6 +498,9 @@ type SchedulerPickRequest struct {
 	Options SchedulerOptions
 	// Candidates contains auth records available for selection.
 	Candidates []SchedulerAuthCandidate
+	// SupportsCandidateFiltering reports that the host can apply AllowedAuthIDs
+	// before running its configured selector, including session affinity.
+	SupportsCandidateFiltering bool
 }
 
 // SchedulerOptions carries request-scoped scheduler inputs.
@@ -526,6 +529,11 @@ type SchedulerAuthCandidate struct {
 
 // SchedulerPickResponse returns a scheduler plugin routing decision.
 type SchedulerPickResponse struct {
+	// AllowedAuthIDs delegates selection to the configured host selector within
+	// this subset of Candidates. Nil preserves legacy scheduling; an explicit
+	// empty slice denies every candidate. It cannot accompany AuthID or
+	// DelegateBuiltin, and requires Handled to be true.
+	AllowedAuthIDs []string
 	// AuthID identifies the selected auth record.
 	AuthID string
 	// DelegateBuiltin asks the host to use a named built-in scheduler.
@@ -545,22 +553,33 @@ type SchedulerPickResponse struct {
 // UnmarshalJSON supports both Go struct field names and snake_case field names.
 func (r *SchedulerPickResponse) UnmarshalJSON(data []byte) error {
 	type rawResponse struct {
-		AuthID          *string `json:"AuthID"`
-		AltAuthID       *string `json:"auth_id"`
-		DelegateBuiltin *string `json:"DelegateBuiltin"`
-		AltDelegate     *string `json:"delegate_builtin"`
-		Handled         *bool   `json:"Handled"`
-		AltHandled      *bool   `json:"handled"`
-		Reject          *bool   `json:"Reject"`
-		AltReject       *bool   `json:"reject"`
-		RejectReason    *string `json:"RejectReason"`
-		AltRejectReason *string `json:"reject_reason"`
-		RejectCode      *string `json:"RejectCode"`
-		AltRejectCode   *string `json:"reject_code"`
+		AllowedAuthIDs    json.RawMessage `json:"AllowedAuthIDs"`
+		AltAllowedAuthIDs json.RawMessage `json:"allowed_auth_ids"`
+		AuthID            *string         `json:"AuthID"`
+		AltAuthID         *string         `json:"auth_id"`
+		DelegateBuiltin   *string         `json:"DelegateBuiltin"`
+		AltDelegate       *string         `json:"delegate_builtin"`
+		Handled           *bool           `json:"Handled"`
+		AltHandled        *bool           `json:"handled"`
+		Reject            *bool           `json:"Reject"`
+		AltReject         *bool           `json:"reject"`
+		RejectReason      *string         `json:"RejectReason"`
+		AltRejectReason   *string         `json:"reject_reason"`
+		RejectCode        *string         `json:"RejectCode"`
+		AltRejectCode     *string         `json:"reject_code"`
 	}
 	var raw rawResponse
 	if errUnmarshal := json.Unmarshal(data, &raw); errUnmarshal != nil {
 		return errUnmarshal
+	}
+	allowed := raw.AllowedAuthIDs
+	if len(allowed) == 0 {
+		allowed = raw.AltAllowedAuthIDs
+	}
+	if len(allowed) != 0 {
+		if errUnmarshal := json.Unmarshal(allowed, &r.AllowedAuthIDs); errUnmarshal != nil {
+			return errUnmarshal
+		}
 	}
 	if raw.AuthID != nil {
 		r.AuthID = *raw.AuthID

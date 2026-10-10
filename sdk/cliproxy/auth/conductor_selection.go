@@ -950,7 +950,7 @@ func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedule
 	return selected, true, nil
 }
 
-func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginScheduler, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, error) {
+func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginScheduler, selector Selector, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, error) {
 	if scheduler == nil || len(candidates) == 0 {
 		return nil, false, nil
 	}
@@ -960,16 +960,20 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		requestProvider = ""
 	}
 	req := pluginapi.SchedulerPickRequest{
-		Provider:   requestProvider,
-		Providers:  schedulerProviders(providerKey, providers),
-		Model:      model,
-		Stream:     opts.Stream,
-		Options:    schedulerOptions(opts),
-		Candidates: schedulerAuthCandidates(candidates),
+		Provider:                   requestProvider,
+		Providers:                  schedulerProviders(providerKey, providers),
+		Model:                      model,
+		Stream:                     opts.Stream,
+		Options:                    schedulerOptions(opts),
+		Candidates:                 schedulerAuthCandidates(candidates),
+		SupportsCandidateFiltering: true,
 	}
 	resp, handled, errPick := scheduler.PickAuth(ctx, req)
 	if errPick != nil {
 		return nil, true, errPick
+	}
+	if resp.AllowedAuthIDs != nil && (!handled || !resp.Handled) {
+		return nil, true, &Error{Code: "invalid_scheduler_filter", Message: "scheduler candidate filter was not handled", HTTPStatus: http.StatusServiceUnavailable}
 	}
 	if !handled || !resp.Handled {
 		return nil, false, nil
@@ -984,6 +988,44 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 			rejectMessage = "scheduler rejected candidate selection"
 		}
 		return nil, true, &Error{Code: rejectCode, Message: rejectMessage}
+	}
+	if resp.AllowedAuthIDs != nil {
+		if errValidate := pluginapi.ValidateSchedulerCandidateFilter(resp, req.Candidates); errValidate != nil {
+			return nil, true, &Error{Code: "invalid_scheduler_filter", Message: errValidate.Error(), HTTPStatus: http.StatusServiceUnavailable}
+		}
+		allowedIDs := make(map[string]struct{}, len(resp.AllowedAuthIDs))
+		for _, id := range resp.AllowedAuthIDs {
+			allowedIDs[strings.TrimSpace(id)] = struct{}{}
+		}
+		filtered := make([]*Auth, 0, len(allowedIDs))
+		for _, candidate := range candidates {
+			if _, ok := allowedIDs[candidate.ID]; ok {
+				filtered = append(filtered, candidate)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil, true, &Error{Code: "no_routed_credential", Message: "no authorized auth candidates", HTTPStatus: http.StatusServiceUnavailable}
+		}
+		// Affinity validates bindings across priorities, and built-in selectors
+		// apply their own priority rules after any weight eligibility checks.
+		// Legacy custom selectors still receive only the highest priority tier.
+		if !isBuiltInSelector(selector) {
+			if _, affinity := selector.(*SessionAffinitySelector); !affinity {
+				filtered = highestPriorityAuths(filtered)
+			}
+		}
+		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
+		selected, errSelect := selector.Pick(selectorCtx, providerKey, selectionArgForSelector(selector, model), opts, filtered)
+		if errSelect != nil {
+			if isBuiltInSelector(selector) {
+				errSelect = restoreModelCooldownErrorModel(errSelect, model)
+			}
+			return nil, true, errSelect
+		}
+		if selected == nil || pickSchedulerAuthByID(filtered, selected.ID) == nil {
+			return nil, true, &Error{Code: "auth_not_found", Message: "selector returned no authorized auth", HTTPStatus: http.StatusServiceUnavailable}
+		}
+		return selected, true, nil
 	}
 	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
 		return selected, true, nil
@@ -1784,7 +1826,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	m.mu.RUnlock()
 
-	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, available)
+	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, selector, provider, []string{provider}, model, opts, tried, available)
 	if errPick != nil {
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errPick)
 		return nil, nil, errPick
@@ -2118,7 +2160,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	m.mu.RUnlock()
 
-	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, available)
+	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, selector, "mixed", providers, model, opts, tried, available)
 	if errPick != nil {
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errPick)
 		return nil, nil, "", errPick
