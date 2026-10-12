@@ -358,6 +358,21 @@ func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
 	if got := gjson.GetBytes(created, "type").String(); got != "response.created" {
 		t.Fatalf("expected response.created, got %s", created)
 	}
+	for _, responseID := range []string{"unknown", "previous"} {
+		if errSend := client.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.interrupt","response_id":%q}`, responseID))); errSend != nil {
+			t.Fatal(errSend)
+		}
+		_, rejected, errRejected := client.ReadMessage()
+		if errRejected != nil {
+			t.Fatal(errRejected)
+		}
+		if got := gjson.GetBytes(rejected, "type").String(); got != "error" {
+			t.Fatalf("unrelated interrupt must be rejected, got %s", rejected)
+		}
+		if executor.canceled.Load() {
+			t.Fatal("unrelated interrupt canceled the HTTP upstream")
+		}
+	}
 	if errSend := client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"r-http","mode":"discard_partial_items"}`)); errSend != nil {
 		t.Fatal(errSend)
 	}
