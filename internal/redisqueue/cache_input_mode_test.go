@@ -37,7 +37,7 @@ func TestUsageQueueCacheInputModeUsesAccountingInsteadOfModelName(t *testing.T) 
 				} else {
 					requireStringField(t, tokens, "cache_input_mode", tc.want)
 				}
-				requireIntField(t, tokens, "input_tokens", tc.input)
+				requireIntField(t, tokens, "input_tokens", int(tc.input))
 				requireIntField(t, tokens, "cache_read_tokens", 2552)
 				requireIntField(t, tokens, "cache_creation_tokens", 17)
 				requireIntField(t, tokens, "total_tokens", 2602)
