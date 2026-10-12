@@ -1,8 +1,6 @@
-name: Sync upstream and release
+name: Manually sync upstream and release
 
 on:
-  schedule:
-    - cron: '23 2 * * 1'
   workflow_dispatch:
 
 permissions:
