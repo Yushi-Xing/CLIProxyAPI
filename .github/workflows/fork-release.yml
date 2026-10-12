@@ -72,6 +72,7 @@ jobs:
       - name: Check HTTP stream startup, cancellation, and accounting
         run: |
           go test -race ./sdk/api/handlers/... ./internal/runtime/executor/helps ./internal/httpwire ./internal/api/middleware ./internal/config -count=1
+          go test -race ./internal/redisqueue ./sdk/cliproxy/usage -count=1
           go test -race ./test -run '^TestHTTPStreamStartup' -count=1
       - name: Build and package static binary
         id: build
