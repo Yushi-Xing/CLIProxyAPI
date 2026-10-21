@@ -255,3 +255,43 @@ func TestHTTPStreamStartupCopiesUpdatedLogsWithoutOverwritingConsumerError(t *te
 		t.Fatal("consumer failure overwritten", body)
 	}
 }
+
+func TestHTTPStreamStartupKeepAliveConfigAliases(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		for _, upstream := range []bool{false, true} {
+			for _, interval := range []int{-1, 0, 30} {
+				cfg := &sdkconfig.SDKConfig{}
+				cfg.Streaming.KeepAliveBeforeFirstChunk = legacy
+				cfg.Streaming.SendKeepAliveBeforeFT = upstream
+				cfg.Streaming.KeepAliveSeconds = interval
+				enabled := (legacy || upstream) && interval > 0
+				if StreamingSendKeepAliveBeforeFT(cfg) != enabled {
+					t.Fatalf("legacy=%v upstream=%v interval=%d", legacy, upstream, interval)
+				}
+				s, _ := testHTTPStartup(t, "openai", true)
+				s.Close()
+				h := NewBaseAPIHandlers(cfg, nil)
+				_, startup, _ := h.PrepareHTTPStream(s.c, context.Background(), func(...interface{}) {}, "openai", true)
+				if (startup.Heartbeats() != nil) != enabled || startup.wait != defaultFirstChunkTimeout {
+					t.Fatalf("legacy=%v upstream=%v interval=%d: heartbeats=%v wait=%v", legacy, upstream, interval, startup.Heartbeats() != nil, startup.wait)
+				}
+				startup.Close()
+			}
+		}
+	}
+}
+
+func TestHTTPStreamStartupClaudeBareCompletedMessage(t *testing.T) {
+	for _, stopReason := range []string{"null", `"end_turn"`} {
+		s, _ := testHTTPStartup(t, "claude", true)
+		payload := []byte(`{"type":"message","content":[{"type":"text","text":"ok"}],"stop_reason":` + stopReason + `}`)
+		s.Observe(payload[:len(payload)/2])
+		if s.Timeout() == nil {
+			t.Fatal("incomplete bare message ended first-output budget")
+		}
+		s.Observe(payload[len(payload)/2:])
+		if (s.Timeout() == nil) != (stopReason != "null") {
+			t.Fatalf("stop_reason=%s, budget ended=%v", stopReason, s.Timeout() == nil)
+		}
+	}
+}

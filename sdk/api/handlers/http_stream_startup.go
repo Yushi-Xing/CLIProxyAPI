@@ -60,7 +60,7 @@ type HTTPStreamStartup struct {
 	snapshot       *gin.Context
 	protocol       string
 	sse            bool
-	ticker         *time.Ticker
+	stopHeartbeat  func()
 	ticks          <-chan time.Time
 	timer          *time.Timer
 	timeout        <-chan time.Time
@@ -74,9 +74,10 @@ type HTTPStreamStartup struct {
 // PrepareHTTPStream adds a finite first-output budget and optional early SSE
 // heartbeats to an HTTP text stream. It leaves WebSocket/internal execution alone.
 func (h *BaseAPIHandler) PrepareHTTPStream(c *gin.Context, ctx context.Context, cancel APIHandlerCancelFunc, protocol string, sse bool) (context.Context, *HTTPStreamStartup, APIHandlerCancelFunc) {
+	cfg := h.CurrentConfig()
 	wait := defaultFirstChunkTimeout
-	if h.Cfg != nil && h.Cfg.Streaming.FirstChunkTimeoutSeconds > 0 {
-		wait = time.Duration(h.Cfg.Streaming.FirstChunkTimeoutSeconds) * time.Second
+	if cfg != nil && cfg.Streaming.FirstChunkTimeoutSeconds > 0 {
+		wait = time.Duration(cfg.Streaming.FirstChunkTimeoutSeconds) * time.Second
 		if wait <= 0 {
 			wait = defaultFirstChunkTimeout
 		}
@@ -98,11 +99,8 @@ func (h *BaseAPIHandler) PrepareHTTPStream(c *gin.Context, ctx context.Context, 
 	s := &HTTPStreamStartup{c: c, ctx: ctx, requestCtx: c.Request.Context(), cancel: stop, finishDelivery: finish, snapshot: snapshot, protocol: protocol, sse: sse, wait: wait}
 	s.timer = time.NewTimer(wait)
 	s.timeout = s.timer.C
-	if h.Cfg != nil && sse && h.Cfg.Streaming.KeepAliveBeforeFirstChunk {
-		if interval := StreamingKeepAliveInterval(h.Cfg); interval > 0 {
-			s.ticker = time.NewTicker(interval)
-			s.ticks = s.ticker.C
-		}
+	if sse && StreamingSendKeepAliveBeforeFT(cfg) {
+		s.ticks, s.stopHeartbeat = NewStreamingKeepAliveTicker(StreamingKeepAliveInterval(cfg))
 	}
 	c.Set(httpStreamStartupKey, s)
 	return ctx, s, func(params ...interface{}) {
@@ -149,8 +147,8 @@ func (s *HTTPStreamStartup) PendingCloseError(errs <-chan *interfaces.ErrorMessa
 // an entrypoint returns early. Snapshot logs can safely outlive Gin recycling.
 func (s *HTTPStreamStartup) Close() {
 	s.timer.Stop()
-	if s.ticker != nil {
-		s.ticker.Stop()
+	if s.stopHeartbeat != nil {
+		s.stopHeartbeat()
 	}
 	s.finishDelivery(context.Canceled)
 	s.cancel(context.Canceled)
@@ -345,6 +343,13 @@ func (s *HTTPStreamStartup) Observe(payload []byte) {
 		return
 	}
 	s.pending = append(s.pending, payload...)
+	// Some Claude-compatible upstreams return a completed message as bare
+	// JSON even for stream requests. Accept a complete terminal object, while
+	// retaining the budget for metadata and incomplete JSON fragments.
+	if s.protocol == "claude" && bytes.HasPrefix(bytes.TrimSpace(s.pending), []byte("{")) && meaningfulStreamPayload(s.protocol, s.pending) {
+		s.markOutput()
+		return
+	}
 	for {
 		end := bytes.Index(s.pending, []byte("\n\n"))
 		width := 2
@@ -403,7 +408,7 @@ func meaningfulStreamPayload(protocol string, payload []byte) bool {
 		}
 	case "claude":
 		typ := node.Get("type").String()
-		if typ == "message_stop" {
+		if typ == "message_stop" || (typ == "message" && nonempty(node.Get("stop_reason"))) {
 			return true
 		}
 		if typ == "content_block_delta" {

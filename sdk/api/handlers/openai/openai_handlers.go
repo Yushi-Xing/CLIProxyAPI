@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -117,7 +118,7 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
 				Type:    "invalid_request_error",
@@ -172,7 +173,7 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
 				Type:    "invalid_request_error",
@@ -551,6 +552,10 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 				return
 			}
 			startup.Observe(chunk)
+			if termErr := chunkTerminalError(chunk); termErr != nil {
+				cliCancel(termErr.Error)
+				return
+			}
 
 			// Continue streaming the rest
 			h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, initialHasFinishReason)
@@ -719,10 +724,31 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 		}
 	}
 }
+func chunkTerminalError(chunk []byte) *interfaces.ErrorMessage {
+	chunk = bytes.TrimSpace(chunk)
+	if bytes.HasPrefix(chunk, []byte("data:")) {
+		chunk = bytes.TrimSpace(chunk[5:])
+	}
+	if gjson.GetBytes(chunk, "choices").Exists() || !gjson.GetBytes(chunk, "error").IsObject() {
+		return nil
+	}
+	msg := gjson.GetBytes(chunk, "error.message").String()
+	if msg == "" {
+		msg = string(chunk)
+	}
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      fmt.Errorf("%s", msg),
+	}
+}
+
 func chunkHasFinishReason(chunk []byte) bool {
 	chunk = bytes.TrimSpace(chunk)
 	if bytes.HasPrefix(chunk, []byte("data:")) {
 		chunk = bytes.TrimSpace(chunk[5:])
+	}
+	if chunkTerminalError(chunk) != nil {
+		return true
 	}
 	for _, choice := range gjson.GetBytes(chunk, "choices").Array() {
 		if reason := choice.Get("finish_reason"); reason.Exists() && reason.Type != gjson.Null && reason.String() != "" {
@@ -734,15 +760,22 @@ func chunkHasFinishReason(chunk []byte) bool {
 
 func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, initialHasFinishReason bool) {
 	sawFinishReason := initialHasFinishReason
+	var terminalChunkErr *interfaces.ErrorMessage
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
-			if !sawFinishReason && chunkHasFinishReason(chunk) {
+			if termErr := chunkTerminalError(chunk); termErr != nil {
+				terminalChunkErr = termErr
+				sawFinishReason = true
+			} else if !sawFinishReason && chunkHasFinishReason(chunk) {
 				sawFinishReason = true
 			}
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
 		},
+		ChunkError: func() *interfaces.ErrorMessage {
+			return terminalChunkErr
+		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-			if errMsg == nil {
+			if errMsg == nil || terminalChunkErr != nil {
 				return
 			}
 			status := http.StatusInternalServerError

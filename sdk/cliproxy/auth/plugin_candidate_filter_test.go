@@ -198,3 +198,84 @@ func TestPluginCandidateFilterWeightedPrioritySkipsZeroWeight(t *testing.T) {
 		t.Fatalf("pick=%+v, err=%v", auth, err)
 	}
 }
+
+func TestPluginCandidateFilterQuotaAffinity(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		for _, scenario := range []string{"transient", "retry", "quota", "revoked"} {
+			name := "single/" + scenario
+			if mixed {
+				name = "mixed/" + scenario
+			}
+			t.Run(name, func(t *testing.T) {
+				affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+					Fallback: &FillFirstSelector{}, TTL: time.Hour, RebindOn: SessionAffinityRebindOnQuota,
+				})
+				defer affinity.Stop()
+				fixture := newCandidateFilterFixture(t, affinity, mixed)
+				opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "quota-filter-session"}}
+				pick := func(want string, tried map[string]struct{}) {
+					t.Helper()
+					auth, err := fixture.pick(opts, tried)
+					if err != nil || auth == nil || auth.ID != want {
+						t.Fatalf("pick=%+v, err=%v; want %s", auth, err, want)
+					}
+				}
+				pick("filter-a", nil)
+				if scenario == "retry" {
+					pick("filter-b", map[string]struct{}{"filter-a": {}})
+				} else {
+					status := http.StatusServiceUnavailable
+					if scenario == "quota" {
+						status = http.StatusTooManyRequests
+					}
+					fixture.manager.MarkResult(context.Background(), Result{AuthID: "filter-a", Model: candidateFilterModel, Error: &Error{HTTPStatus: status, Message: "test upstream failure"}})
+					if scenario == "revoked" {
+						delete(fixture.allowed, "filter-a")
+					}
+					pick("filter-b", nil)
+				}
+				fixture.allowed["filter-a"] = true
+				fixture.manager.MarkResult(context.Background(), Result{AuthID: "filter-a", Model: candidateFilterModel, Success: true})
+				want := "filter-a"
+				if scenario == "quota" || scenario == "revoked" {
+					want = "filter-b"
+				}
+				pick(want, nil)
+			})
+		}
+	}
+}
+
+func TestPluginCandidateFilterQuotaAffinityRecheckFailsClosed(t *testing.T) {
+	for _, response := range []pluginapi.SchedulerPickResponse{
+		{},
+		{Handled: true, Reject: true},
+		{Handled: true, AuthID: "filter-a"},
+		{Handled: true, AllowedAuthIDs: []string{"not-a-candidate"}},
+		{Handled: true, AllowedAuthIDs: []string{}},
+	} {
+		affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+			Fallback: &FillFirstSelector{}, TTL: time.Hour, RebindOn: SessionAffinityRebindOnQuota,
+		})
+		fixture := newCandidateFilterFixture(t, affinity, false)
+		opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "recheck-session"}}
+		if _, err := fixture.pick(opts, nil); err != nil {
+			t.Fatal(err)
+		}
+		fixture.manager.MarkResult(context.Background(), Result{AuthID: "filter-a", Model: candidateFilterModel, Error: &Error{HTTPStatus: http.StatusServiceUnavailable}})
+		original := fixture.scheduler.pick
+		calls := 0
+		fixture.scheduler.pick = func(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+			calls++
+			if calls == 2 {
+				return response, true, nil
+			}
+			return original(ctx, req)
+		}
+		auth, err := fixture.pick(opts, nil)
+		affinity.Stop()
+		if calls != 2 || auth != nil || err == nil {
+			t.Fatalf("recheck=%+v calls=%d auth=%+v err=%v", response, calls, auth, err)
+		}
+	}
+}

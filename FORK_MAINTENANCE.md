@@ -4,10 +4,11 @@ This fork keeps the Antigravity Chat Completions tool-image fix on `main`.
 Upstream changes are merged into that branch; the branch is never reset or
 force-pushed to match upstream.
 
-## Automatic synchronization
+## Manual synchronization
 
-`Sync upstream and release` runs every Monday at 02:23 UTC (10:23 in China),
-and can also be started manually from the Actions tab.
+`Sync upstream and release` runs only when started manually from the Actions
+tab. Automatic schedules and push-triggered workflows remain disabled.
+The workflow performs these steps:
 
 1. Fetch `router-for-me/CLIProxyAPI`'s `main` branch.
 2. Prepare a merge without committing or pushing it.
@@ -93,3 +94,23 @@ gh workflow run fork-release.yml --ref main -f "revision=$(git rev-parse HEAD)"
 
 If upstream later fixes the same image conversion, review the implementations
 and remove the redundant fork patch while retaining regression coverage.
+
+## Streaming and routing compatibility
+
+The v8.0.36 integration retains native Antigravity tool-image parts,
+plugin-authorized candidate filtering, delivery-aware accounting, and the
+360-second default first-output deadline. The deadline ends at meaningful
+model output; it does not limit the total generation time.
+
+`streaming.send-keepalive-before-ft` and the legacy
+`streaming.keepalive-before-first-chunk` both enable the same startup heartbeat
+when `streaming.keepalive-seconds` is positive. Either flag is sufficient.
+Both are opt-in; existing configurations retain their behavior.
+
+With `routing.session-affinity-rebind-on: quota`, a transient failure preserves
+the original binding only while the billing scheduler still authorizes that
+credential. The host may perform one additional permission-filter query for
+unavailable affinity candidates. Only currently available, authorized
+credentials can execute a request. Legacy account-picking schedulers are
+never offered unavailable credentials. The default `any` mode remains
+unchanged.
