@@ -170,12 +170,36 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 				bufferedSendable++
 			}
 
+			appendCommentaryContent := func(part gjson.Result) {
+				if messageRole != "assistant" {
+					return
+				}
+				text := part.Get("thinking").String()
+				if text == "" {
+					return
+				}
+				// A relayed commentary block becomes its own assistant message item
+				// carrying phase "commentary", mirroring the Codex output item it
+				// came from. The internal marker is consumed here and never
+				// forwarded upstream.
+				flushMessage()
+				content := []byte(`{"type":"output_text","text":""}`)
+				content, _ = sjson.SetBytes(content, "text", text)
+				message := []byte(`{"type":"message","role":"assistant","phase":"commentary"}`)
+				message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray([][]byte{content}))
+				inputItems = append(inputItems, message)
+			}
+
 			appendReasoningContent := func(part gjson.Result) {
 				if messageRole != "assistant" {
 					return
 				}
 
 				rawSignature := part.Get("signature").String()
+				if sigcompat.IsCodexCommentarySignatureMarker(rawSignature) {
+					appendCommentaryContent(part)
+					return
+				}
 				signature, ok := translatorcommon.CodexReplaySignatureForTarget(signatureTargetModel, rawSignature)
 				if !ok && preserveEmptyThinkingBlocks && part.Get("signature").Type == gjson.String && strings.TrimSpace(rawSignature) != "" &&
 					sigcompat.DetectSignatureProviderForBlock(rawSignature, sigcompat.SignatureBlockKindClaudeThinking) == sigcompat.SignatureProviderUnknown {
@@ -380,8 +404,12 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	// Add additional configuration parameters for the Codex API.
 	template, _ = sjson.SetBytes(template, "parallel_tool_calls", parallelToolCalls)
 
-	// Convert thinking.budget_tokens to reasoning.effort.
+	// Convert Claude thinking budgets and effort to reasoning.effort.
 	reasoningEffort := "medium"
+	effort := ""
+	if v := rootResult.Get("output_config.effort"); v.Exists() && v.Type == gjson.String {
+		effort = strings.ToLower(strings.TrimSpace(v.String()))
+	}
 	if thinkingConfig := rootResult.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
 		switch thinkingConfig.Get("type").String() {
 		case "enabled":
@@ -394,10 +422,6 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 		case "adaptive", "auto":
 			// Adaptive thinking can carry an explicit effort in output_config.effort (Claude 4.6).
 			// Pass through directly; ApplyThinking handles clamping to target model's levels.
-			effort := ""
-			if v := rootResult.Get("output_config.effort"); v.Exists() && v.Type == gjson.String {
-				effort = strings.ToLower(strings.TrimSpace(v.String()))
-			}
 			if effort != "" {
 				reasoningEffort = effort
 			} else {
@@ -408,6 +432,8 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 				reasoningEffort = effort
 			}
 		}
+	} else if !thinkingConfig.Exists() && effort != "" {
+		reasoningEffort = effort
 	}
 	template, _ = sjson.SetBytes(template, "reasoning.effort", reasoningEffort)
 	// OpenAI documents reasoning summaries as explicit opt-in output. Leave

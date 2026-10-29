@@ -9,6 +9,7 @@ import (
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -277,5 +278,43 @@ func TestPluginCandidateFilterQuotaAffinityRecheckFailsClosed(t *testing.T) {
 		if calls != 2 || auth != nil || err == nil {
 			t.Fatalf("recheck=%+v calls=%d auth=%+v err=%v", response, calls, auth, err)
 		}
+	}
+}
+
+func TestPluginCandidateFilterSelectionIDPreserved(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		fixture := newCandidateFilterFixture(t, &FillFirstSelector{}, mixed)
+		var seen string
+		original := fixture.scheduler.pick
+		fixture.scheduler.pick = func(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+			seen, _ = req.Options.Metadata[cliproxyexecutor.SelectionIDMetadataKey].(string)
+			return original(ctx, req)
+		}
+		opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.SelectionIDMetadataKey: "stale"}}
+		picked, err := fixture.pick(opts, nil)
+		if err != nil || picked == nil || picked.ID != "filter-a" || seen == "" || seen == "stale" || opts.Metadata[cliproxyexecutor.SelectionIDMetadataKey] != seen {
+			t.Fatalf("mixed=%v pick=%+v err=%v seen=%q metadata=%v", mixed, picked, err, seen, opts.Metadata)
+		}
+	}
+}
+
+func TestPluginCandidateFilterSelectionIDReachesExecutor(t *testing.T) {
+	fixture := newCandidateFilterFixture(t, &FillFirstSelector{}, false)
+	var pickedID, executedID string
+	original := fixture.scheduler.pick
+	fixture.scheduler.pick = func(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+		pickedID, _ = req.Options.Metadata[cliproxyexecutor.SelectionIDMetadataKey].(string)
+		return original(ctx, req)
+	}
+	fixture.manager.RegisterExecutor(&callbackSchedulerTestExecutor{
+		schedulerTestExecutor: schedulerTestExecutor{provider: "zed"},
+		execute: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			executedID = coreusage.SelectionIDFromContext(ctx)
+			return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+		},
+	})
+	_, err := fixture.manager.Execute(context.Background(), []string{"zed"}, cliproxyexecutor.Request{Model: candidateFilterModel}, cliproxyexecutor.Options{})
+	if err != nil || pickedID == "" || executedID != pickedID {
+		t.Fatalf("execute err=%v scheduler ID=%q executor ID=%q", err, pickedID, executedID)
 	}
 }

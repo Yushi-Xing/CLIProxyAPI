@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -21,18 +22,42 @@ import (
 
 // responsesLocalInterrupt cancels an in-flight HTTP turn. A websocket upstream
 // does not use it; that interrupt is written to the existing socket instead.
+// A claimed frame is never silently dropped: the forward loop consumes it, or
+// deliver returns false so the reader answers the interrupt itself.
+//
+// wsTurnActive is the socket-scoped ownership gate: while the current turn
+// runs on an upstream websocket, no frame may claim the local path at all,
+// not even in the window after that socket was lost. "No live websocket
+// channel right now" must never be read as "this turn is HTTP".
 type responsesLocalInterrupt struct {
-	mu         sync.Mutex
-	active     bool
-	responseID string
-	frames     chan []byte
+	mu           sync.Mutex
+	active       bool
+	wsTurnActive bool
+	responseID   string
+	frames       chan []byte
 }
 
 func newResponsesLocalInterrupt() *responsesLocalInterrupt {
 	return &responsesLocalInterrupt{frames: make(chan []byte, 1)}
 }
 
-func (s *responsesLocalInterrupt) begin() {
+// begin activates claims for a turn and records its ownership in the same
+// critical section: a websocket-owned turn must never expose an instant in
+// which claims are active but ownership is not yet visible to deliver.
+func (s *responsesLocalInterrupt) begin(websocketOwned bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.active = true
+	s.responseID = ""
+	s.wsTurnActive = websocketOwned
+	s.mu.Unlock()
+}
+
+// reactivate reopens claims for the next response on the same turn (duplex),
+// preserving the ownership recorded by begin.
+func (s *responsesLocalInterrupt) reactivate() {
 	if s == nil {
 		return
 	}
@@ -42,22 +67,29 @@ func (s *responsesLocalInterrupt) begin() {
 	s.mu.Unlock()
 }
 
-func (s *responsesLocalInterrupt) end() {
+func (s *responsesLocalInterrupt) endWebsocketTurn() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.wsTurnActive = false
+	s.mu.Unlock()
+}
+
+// stopClaims stops accepting new frames without draining the queue: a frame
+// already claimed by deliver stays consumable so the forward loop answers it
+// instead of silently dropping it when the turn ends.
+func (s *responsesLocalInterrupt) stopClaims() {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	s.active = false
 	s.responseID = ""
-	select {
-	case <-s.frames:
-	default:
-	}
 	s.mu.Unlock()
 }
 
-// Observe lifecycle state before writing downstream: the client may send an
-// interrupt as soon as it receives the corresponding response event.
+// Observe lifecycle before writing downstream so interrupts target the active response.
 func (s *responsesLocalInterrupt) observe(payload []byte) {
 	if s == nil {
 		return
@@ -69,8 +101,19 @@ func (s *responsesLocalInterrupt) observe(payload []byte) {
 		s.responseID = gjson.GetBytes(payload, "response.id").String()
 		s.mu.Unlock()
 	} else if isResponsesWebsocketCompletionEvent(event) || event == "response.incomplete" || event == "response.failed" || event == wsEventTypeError {
-		s.end()
+		s.stopClaims()
 	}
+}
+
+func (s *responsesLocalInterrupt) end()        { s.stopClaims() }
+func (s *responsesLocalInterrupt) deactivate() { s.stopClaims() }
+func (s *responsesLocalInterrupt) isActive() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active
 }
 
 func (s *responsesLocalInterrupt) deliver(payload []byte) bool {
@@ -80,14 +123,15 @@ func (s *responsesLocalInterrupt) deliver(payload []byte) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	responseID := gjson.GetBytes(payload, "response_id")
-	if !s.active || s.responseID == "" || responseID.Type != gjson.String || responseID.String() != s.responseID {
+	if !s.active || s.wsTurnActive || s.responseID == "" || responseID.Type != gjson.String || responseID.String() != s.responseID {
 		return false
 	}
 	select {
 	case s.frames <- bytes.Clone(payload):
+		return true
 	default:
+		return false
 	}
-	return true
 }
 
 func (s *responsesLocalInterrupt) framesChan() <-chan []byte {
@@ -97,10 +141,24 @@ func (s *responsesLocalInterrupt) framesChan() <-chan []byte {
 	return s.frames
 }
 
+// takeClaimed consumes a queued claimed frame without blocking. The caller
+// becomes responsible for answering it exactly once.
+func (s *responsesLocalInterrupt) takeClaimed() []byte {
+	if s == nil {
+		return nil
+	}
+	select {
+	case frame := <-s.frames:
+		return frame
+	default:
+		return nil
+	}
+}
+
 // readResponsesWebsocketInput is the only downstream reader. Interrupts are
 // handled immediately so they are not queued behind an active response.
 // The bounded queue backpressures clients instead of retaining unlimited input.
-func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCauseFunc, conn *websocket.Conn, interrupt func([]byte) error, local *responsesLocalInterrupt, writer *responsesWebsocketWriter, timeline websocketTimelineAppender) (<-chan cliproxyexecutor.WebsocketInput, <-chan struct{}) {
+func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCauseFunc, conn *websocket.Conn, interrupt func([]byte) error, local *responsesLocalInterrupt, writer *responsesWebsocketWriter, timeline websocketTimelineAppender, epoch *atomic.Uint64) (<-chan cliproxyexecutor.WebsocketInput, <-chan struct{}) {
 	input := make(chan cliproxyexecutor.WebsocketInput, 16)
 	done := make(chan struct{})
 	go func() {
@@ -112,6 +170,7 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 				cancel(errRead)
 				return
 			}
+			msgEpoch := epoch.Load()
 			if kind != websocket.TextMessage && kind != websocket.BinaryMessage {
 				continue
 			}
@@ -142,8 +201,9 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 					continue
 				}
 			}
+			message := cliproxyexecutor.WebsocketInput{Payload: payload, Epoch: msgEpoch}
 			select {
-			case input <- cliproxyexecutor.WebsocketInput{Payload: payload}:
+			case input <- message:
 			case <-ctx.Done():
 				return
 			}
