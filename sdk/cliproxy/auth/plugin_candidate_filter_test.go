@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"testing"
@@ -316,5 +317,22 @@ func TestPluginCandidateFilterSelectionIDReachesExecutor(t *testing.T) {
 	_, err := fixture.manager.Execute(context.Background(), []string{"zed"}, cliproxyexecutor.Request{Model: candidateFilterModel}, cliproxyexecutor.Options{})
 	if err != nil || pickedID == "" || executedID != pickedID {
 		t.Fatalf("execute err=%v scheduler ID=%q executor ID=%q", err, pickedID, executedID)
+	}
+}
+
+// TestPluginCandidateFilterAndExclusionsIntersect verifies that neither an
+// allow-list nor an exclusion can widen the other during a selection.
+func TestPluginCandidateFilterAndExclusionsIntersect(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mixed=%v", mixed), func(t *testing.T) {
+			fixture := newCandidateFilterFixture(t, &FillFirstSelector{}, mixed)
+			fixture.scheduler.pick = func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+				return pluginapi.SchedulerPickResponse{Handled: true, AllowedAuthIDs: []string{"filter-a", "filter-b"}, ExcludeCandidates: []string{"filter-a"}}, true, nil
+			}
+			got, err := fixture.pick(cliproxyexecutor.Options{}, nil)
+			if err != nil || got == nil || got.ID != "filter-b" {
+				t.Fatalf("got=%+v err=%v", got, err)
+			}
+		})
 	}
 }

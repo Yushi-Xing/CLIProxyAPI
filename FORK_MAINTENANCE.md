@@ -114,3 +114,25 @@ unavailable affinity candidates. Only currently available, authorized
 credentials can execute a request. Legacy account-picking schedulers are
 never offered unavailable credentials. The default `any` mode remains
 unchanged.
+
+## Codex refresh journal after v8.0.73
+
+Codex and local SIWC refreshes persist journal claims and receipts alongside
+credentials. File-backed installs use the `.codex-refresh/` directory under
+`auth-dir`. Receipts contain credentials, so apply the same access controls and
+include the complete journal with credentials during backups and migrations.
+Do not delete a claim to retry an uncertain refresh: reconcile the successful
+refresh result or sign in again with a new grant. All CPA instances sharing a
+grant must share the same authoritative journal; older deployments or external
+clients that refresh the same grant do not participate in this coordination.
+See `docs/codex-refresh-recovery.md` for store-specific requirements.
+
+## v8.0.73 merge validation
+
+The upstream scheduler's `ExcludeCandidates` and this fork's `AllowedAuthIDs`
+represent different constraints. Selection must use their intersection and
+never fall back to an unrestricted pool on an invalid authorization filter.
+The Antigravity OpenAI tool-image fix remains necessary; upstream's Claude to
+Gemini image fix covers a different translator. Keep the first-output deadline
+and delivery-aware accounting when changing streaming startup or heartbeat
+behavior.

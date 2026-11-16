@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertOpenAIRequestToAntigravityToolImages(t *testing.T) {
@@ -116,7 +116,7 @@ func TestConvertOpenAIRequestToAntigravityToolImages(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ConvertOpenAIRequestToAntigravity: %v", err)
 			}
-			response := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse")
+			response := ojson.GetBytes(out, "request.contents.2.parts.0.functionResponse")
 			if got := response.Get("id").String(); got != "call_image" {
 				t.Fatalf("functionResponse.id = %q, want call_image", got)
 			}
@@ -124,7 +124,7 @@ func TestConvertOpenAIRequestToAntigravityToolImages(t *testing.T) {
 				t.Fatalf("functionResponse.name = %q, want view_image", got)
 			}
 			result := response.Get("response.result")
-			if result.Type != gjson.String || result.String() != tt.wantResult {
+			if result.Type != ojson.String || result.String() != tt.wantResult {
 				t.Fatalf("response.result = %s, want string %q", result.Raw, tt.wantResult)
 			}
 			parts := response.Get("parts").Array()
@@ -161,7 +161,7 @@ func TestConvertOpenAIRequestToAntigravityToolImagesStayScopedToCallAndTurn(t *t
 	if err != nil {
 		t.Fatalf("ConvertOpenAIRequestToAntigravity: %v", err)
 	}
-	contents := gjson.GetBytes(out, "request.contents").Array()
+	contents := ojson.GetBytes(out, "request.contents").Array()
 	if len(contents) != 5 {
 		t.Fatalf("contents count = %d, want 5", len(contents))
 	}
@@ -201,7 +201,7 @@ func TestConvertOpenAIRequestToAntigravityLargeToolImageIsNotText(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ConvertOpenAIRequestToAntigravity: %v", err)
 	}
-	response := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse")
+	response := ojson.GetBytes(out, "request.contents.2.parts.0.functionResponse")
 	if got := response.Get("response.result").String(); got != "{}" {
 		t.Fatalf("image-only result contains %d text bytes, want empty fallback", len(got))
 	}

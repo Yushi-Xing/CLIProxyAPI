@@ -4,9 +4,12 @@ package pluginapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/MoeForge/moego/ojson"
 )
 
 // Plugin is the host-side representation produced from a dynamic plugin registration.
@@ -78,6 +81,10 @@ type Capabilities struct {
 	ModelProvider ModelProvider
 	// AuthProvider lets the host parse, login, poll, and refresh plugin provider auths.
 	AuthProvider AuthProvider
+	// AuthProviders lets a plugin register multiple provider auth entries (for example,
+	// multi-portal vendors sharing the same plugin). When non-empty, each entry is exposed
+	// under its own identifier alongside AuthProvider.
+	AuthProviders []AuthProvider
 	// FrontendAuthProvider authenticates frontend requests before proxy handling.
 	FrontendAuthProvider FrontendAuthProvider
 	// FrontendAuthProviderExclusive makes this frontend auth provider the only active request auth provider when selected.
@@ -101,7 +108,10 @@ type Capabilities struct {
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
-	// Empty defaults to ExecutorModelScopeBoth for backward compatibility.
+	// Empty defaults to ExecutorModelScopeOAuth when AuthProvider/AuthProviders is declared,
+	// and ExecutorModelScopeBoth otherwise for backward compatibility.
+	// When AuthProvider/AuthProviders is declared, only ExecutorModelScopeStatic registers an
+	// unauthenticated static model client in ModelRegistry.
 	ExecutorModelScope ExecutorModelScope
 	// ExecutorInputFormats lists request protocols accepted directly by Executor. Executors must declare at least one.
 	ExecutorInputFormats []string
@@ -165,7 +175,8 @@ type Capabilities struct {
 type ExecutorModelScope string
 
 const (
-	// ExecutorModelScopeBoth means the executor supports static and OAuth auth-bound models.
+	// ExecutorModelScopeBoth means the executor supports static and OAuth auth-bound models
+	// when no AuthProvider/AuthProviders is declared, or OAuth auth-bound models when credential-bound.
 	ExecutorModelScopeBoth ExecutorModelScope = "both"
 	// ExecutorModelScopeStatic means the executor supports only non-OAuth static models.
 	ExecutorModelScopeStatic ExecutorModelScope = "static"
@@ -313,6 +324,30 @@ type AuthProvider interface {
 	RefreshAuth(context.Context, AuthRefreshRequest) (AuthRefreshResponse, error)
 }
 
+// MultiAuthProvider is an optional extension implemented by an AuthProvider
+// that handles multiple provider identifiers (for example, multi-portal vendors).
+type MultiAuthProvider interface {
+	AuthProvider
+	Identifiers() []string
+}
+
+// AuthProviderEntry describes user-facing display metadata for one OAuth login entry.
+type AuthProviderEntry struct {
+	// Identifier is the provider key used for login and callback routing.
+	Identifier string `json:"identifier"`
+	// Name is the user-facing display label for this entry; falls back to Metadata.Name when empty.
+	Name string `json:"name,omitempty"`
+	// Logo is the display asset reference for this entry; falls back to Metadata.Logo when empty.
+	Logo string `json:"logo,omitempty"`
+}
+
+// AuthProviderEntries is an optional extension implemented by an AuthProvider
+// that publishes per-entry display metadata (name and logo).
+type AuthProviderEntries interface {
+	AuthProvider
+	AuthEntries() []AuthProviderEntry
+}
+
 // AuthLoginStartRequest asks a plugin to start a provider login flow.
 type AuthLoginStartRequest struct {
 	// Provider is the provider key for the login flow.
@@ -416,6 +451,16 @@ type ModelRegistrar interface {
 type ModelRegistrationRequest struct {
 	// Plugin is the metadata of the plugin being registered.
 	Plugin Metadata
+	// MultiProviderModels reports whether the host supports ModelRegistrationResponse.Registrations.
+	MultiProviderModels bool `json:"multi_provider_models,omitempty"`
+}
+
+// ProviderModels pairs a provider key with the models registered for it.
+type ProviderModels struct {
+	// Provider is the provider key associated with the returned models.
+	Provider string `json:"provider,omitempty"`
+	// Models is the complete set of plugin-provided models for Provider.
+	Models []ModelInfo `json:"models,omitempty"`
 }
 
 // ModelRegistrationResponse returns provider and model metadata to register.
@@ -424,6 +469,12 @@ type ModelRegistrationResponse struct {
 	Provider string
 	// Models is the complete set of plugin-provided models.
 	Models []ModelInfo
+	// Registrations registers model sets for multiple providers in one call.
+	// When non-empty, each entry is registered under its own Provider for catalog
+	// and per-auth model discovery (plugins that also declare an Executor still
+	// bind that executor to the first registered provider); when empty, Provider
+	// and Models behave as a single registration.
+	Registrations []ProviderModels `json:"registrations,omitempty"`
 }
 
 // ModelProvider contributes provider-native static and per-auth model metadata.
@@ -439,6 +490,8 @@ type StaticModelRequest struct {
 	Plugin Metadata
 	// Host contains relevant host configuration.
 	Host HostConfigSummary
+	// MultiProviderModels reports whether the host supports ModelResponse.Registrations.
+	MultiProviderModels bool `json:"multi_provider_models,omitempty"`
 }
 
 // AuthModelRequest carries auth context for provider model discovery.
@@ -467,6 +520,9 @@ type ModelResponse struct {
 	Provider string
 	// Models is the complete set of discovered provider models.
 	Models []ModelInfo
+	// Registrations registers static model sets for multiple providers in one call.
+	// Used by StaticModels when non-empty; ignored by ModelsForAuth.
+	Registrations []ProviderModels `json:"registrations,omitempty"`
 	// AuthUpdate contains updated auth data from model discovery when needed.
 	AuthUpdate AuthData
 }
@@ -594,25 +650,30 @@ type SchedulerPickResponse struct {
 	RejectReason string
 	// RejectCode is an optional machine-readable error code for the rejection (defaults to "auth_unavailable").
 	RejectCode string
+	// ExcludeCandidates optionally lists auth IDs to exclude for the current selection pass
+	// when the scheduler declines handling (Handled: false) or delegates to a built-in scheduler.
+	ExcludeCandidates []string
 }
 
 // UnmarshalJSON supports both Go struct field names and snake_case field names.
 func (r *SchedulerPickResponse) UnmarshalJSON(data []byte) error {
 	type rawResponse struct {
-		AllowedAuthIDs    json.RawMessage `json:"AllowedAuthIDs"`
-		AltAllowedAuthIDs json.RawMessage `json:"allowed_auth_ids"`
-		AuthID            *string         `json:"AuthID"`
-		AltAuthID         *string         `json:"auth_id"`
-		DelegateBuiltin   *string         `json:"DelegateBuiltin"`
-		AltDelegate       *string         `json:"delegate_builtin"`
-		Handled           *bool           `json:"Handled"`
-		AltHandled        *bool           `json:"handled"`
-		Reject            *bool           `json:"Reject"`
-		AltReject         *bool           `json:"reject"`
-		RejectReason      *string         `json:"RejectReason"`
-		AltRejectReason   *string         `json:"reject_reason"`
-		RejectCode        *string         `json:"RejectCode"`
-		AltRejectCode     *string         `json:"reject_code"`
+		AllowedAuthIDs       json.RawMessage `json:"AllowedAuthIDs"`
+		AltAllowedAuthIDs    json.RawMessage `json:"allowed_auth_ids"`
+		AuthID               *string         `json:"AuthID"`
+		AltAuthID            *string         `json:"auth_id"`
+		DelegateBuiltin      *string         `json:"DelegateBuiltin"`
+		AltDelegate          *string         `json:"delegate_builtin"`
+		Handled              *bool           `json:"Handled"`
+		AltHandled           *bool           `json:"handled"`
+		Reject               *bool           `json:"Reject"`
+		AltReject            *bool           `json:"reject"`
+		RejectReason         *string         `json:"RejectReason"`
+		AltRejectReason      *string         `json:"reject_reason"`
+		RejectCode           *string         `json:"RejectCode"`
+		AltRejectCode        *string         `json:"reject_code"`
+		ExcludeCandidates    json.RawMessage `json:"ExcludeCandidates"`
+		AltExcludeCandidates json.RawMessage `json:"exclude_candidates"`
 	}
 	var raw rawResponse
 	if errUnmarshal := json.Unmarshal(data, &raw); errUnmarshal != nil {
@@ -657,7 +718,42 @@ func (r *SchedulerPickResponse) UnmarshalJSON(data []byte) error {
 	} else if raw.AltRejectCode != nil {
 		r.RejectCode = *raw.AltRejectCode
 	}
+	if len(raw.ExcludeCandidates) > 0 {
+		excluded, errExclude := parseExcludeCandidatesJSON(raw.ExcludeCandidates)
+		if errExclude != nil {
+			return errExclude
+		}
+		r.ExcludeCandidates = excluded
+	} else if len(raw.AltExcludeCandidates) > 0 {
+		excluded, errExclude := parseExcludeCandidatesJSON(raw.AltExcludeCandidates)
+		if errExclude != nil {
+			return errExclude
+		}
+		r.ExcludeCandidates = excluded
+	}
 	return nil
+}
+
+func parseExcludeCandidatesJSON(raw []byte) ([]string, error) {
+	if !ojson.ValidBytes(raw) {
+		return nil, fmt.Errorf("exclude_candidates contains invalid JSON")
+	}
+	parsed := ojson.ParseBytes(raw)
+	if parsed.Type == ojson.Null {
+		return nil, nil
+	}
+	if !parsed.IsArray() {
+		return nil, fmt.Errorf("exclude_candidates must be a JSON array")
+	}
+	items := parsed.Array()
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Type != ojson.String {
+			return nil, fmt.Errorf("exclude_candidates entries must be strings")
+		}
+		out = append(out, item.String())
+	}
+	return out, nil
 }
 
 // ModelRouteRequest describes the original request context offered to a model router plugin.
@@ -1702,6 +1798,29 @@ type UsageDetail struct {
 	CacheCreationTokens int64
 	// TotalTokens is the total token count.
 	TotalTokens int64
+
+	// TextInputTokens is the optional text input token count.
+	TextInputTokens *int64
+	// ImageInputTokens is the optional image input token count.
+	ImageInputTokens *int64
+	// AudioInputTokens is the optional audio input token count.
+	AudioInputTokens *int64
+	// VideoInputTokens is the optional video input token count.
+	VideoInputTokens *int64
+	// FileInputTokens is the optional file input token count.
+	FileInputTokens *int64
+	// CachedTextTokens is the optional cached text token count.
+	CachedTextTokens *int64
+	// CachedImageTokens is the optional cached image token count.
+	CachedImageTokens *int64
+	// CachedAudioTokens is the optional cached audio token count.
+	CachedAudioTokens *int64
+	// TextOutputTokens is the optional text output token count.
+	TextOutputTokens *int64
+	// ImageOutputTokens is the optional image output token count.
+	ImageOutputTokens *int64
+	// AudioOutputTokens is the optional audio output token count.
+	AudioOutputTokens *int64
 }
 
 // QuotaProvider surfaces credential quota, balance, and billing information for management clients.

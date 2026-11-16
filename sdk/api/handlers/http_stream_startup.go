@@ -11,13 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 type httpStreamContextKey struct{}
@@ -61,6 +61,7 @@ type HTTPStreamStartup struct {
 	protocol       string
 	sse            bool
 	stopHeartbeat  func()
+	resetHeartbeat func()
 	ticks          <-chan time.Time
 	timer          *time.Timer
 	timeout        <-chan time.Time
@@ -100,7 +101,7 @@ func (h *BaseAPIHandler) PrepareHTTPStream(c *gin.Context, ctx context.Context, 
 	s.timer = time.NewTimer(wait)
 	s.timeout = s.timer.C
 	if sse && StreamingSendKeepAliveBeforeFT(cfg) {
-		s.ticks, s.stopHeartbeat = NewStreamingKeepAliveTicker(StreamingKeepAliveInterval(cfg))
+		s.ticks, s.stopHeartbeat, s.resetHeartbeat = NewStreamingKeepAliveTickerWithReset(StreamingKeepAliveInterval(cfg))
 	}
 	c.Set(httpStreamStartupKey, s)
 	return ctx, s, func(params ...interface{}) {
@@ -235,7 +236,12 @@ func (s *HTTPStreamStartup) errorChannels(err error) (<-chan []byte, http.Header
 }
 
 func (s *HTTPStreamStartup) Heartbeats() <-chan time.Time { return s.ticks }
-func (s *HTTPStreamStartup) Timeout() <-chan time.Time    { return s.timeout }
+func (s *HTTPStreamStartup) ResetHeartbeat() {
+	if s.resetHeartbeat != nil {
+		s.resetHeartbeat()
+	}
+}
+func (s *HTTPStreamStartup) Timeout() <-chan time.Time { return s.timeout }
 func (s *HTTPStreamStartup) TimeoutError() *interfaces.ErrorMessage {
 	s.timeout = nil
 	err := &firstChunkTimeoutError{wait: s.wait}
@@ -266,10 +272,14 @@ func (s *HTTPStreamStartup) SetHeaders(upstream http.Header) {
 		s.c.Writer.Header().Del("Content-Length")
 		s.c.Header("Content-Type", "text/event-stream")
 	}
+	s.c.Writer.WriteHeader(http.StatusOK)
 }
 
 // WritePayload reports transport failures before accepting model output.
 func (s *HTTPStreamStartup) WritePayload(payload []byte) error {
+	if !s.c.Writer.Written() {
+		s.c.Writer.WriteHeader(http.StatusOK)
+	}
 	if n, err := s.c.Writer.Write(payload); err != nil {
 		return err
 	} else if n != len(payload) {
@@ -381,12 +391,12 @@ func (s *HTTPStreamStartup) Observe(payload []byte) {
 func (s *HTTPStreamStartup) markOutput() { s.timer.Stop(); s.timeout = nil; s.pending = nil }
 
 func meaningfulStreamPayload(protocol string, payload []byte) bool {
-	if !gjson.ValidBytes(payload) {
+	if !ojson.ValidBytes(payload) {
 		return false
 	}
-	node := gjson.ParseBytes(payload)
-	nonempty := func(n gjson.Result) bool { return n.Type == gjson.String && n.Str != "" }
-	output := func(n gjson.Result) bool {
+	node := ojson.ParseBytes(payload)
+	nonempty := func(n ojson.Result) bool { return n.Type == ojson.String && n.Str != "" }
+	output := func(n ojson.Result) bool {
 		for _, key := range []string{"content", "text", "thinking", "reasoning_content", "reasoning", "partial_json", "signature", "audio.data"} {
 			if nonempty(n.Get(key)) {
 				return true

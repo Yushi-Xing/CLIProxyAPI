@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestAntigravityExecutorChatToolImagesReachUpstream(t *testing.T) {
@@ -95,8 +95,8 @@ func TestAntigravityExecutorChatToolImagesReachUpstream(t *testing.T) {
 				default:
 					t.Fatal("executor did not send an upstream request")
 				}
-				responses := make(map[string]gjson.Result)
-				for _, content := range gjson.GetBytes(body, "request.contents").Array() {
+				responses := make(map[string]ojson.Result)
+				for _, content := range ojson.GetBytes(body, "request.contents").Array() {
 					for _, part := range content.Get("parts").Array() {
 						if response := part.Get("functionResponse"); response.Exists() {
 							responses[response.Get("id").String()] = response
@@ -115,7 +115,7 @@ func TestAntigravityExecutorChatToolImagesReachUpstream(t *testing.T) {
 					t.Fatal("native tool image missing from final upstream request")
 				}
 				text := responses["call_text"]
-				if text.Get("name").String() != "read_file" || text.Get("response.result").Type != gjson.String || text.Get("response.result").String() != `{"width":1}` || text.Get("parts").Exists() {
+				if text.Get("name").String() != "read_file" || text.Get("response.result").Type != ojson.String || text.Get("response.result").String() != `{"width":1}` || text.Get("parts").Exists() {
 					t.Fatal("plain tool result changed or acquired another tool's image")
 				}
 				if got := strings.Count(string(body), "aW1hZ2U="); got != 1 {

@@ -161,16 +161,85 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 	if opts.KeepAliveInterval != nil {
 		keepAliveInterval = *opts.KeepAliveInterval
 	}
-	var keepAliveC <-chan time.Time
+	keepAliveC, stopKeepAlive, resetKeepAlive := NewStreamingKeepAliveTickerWithReset(keepAliveInterval)
 	if keepAliveInterval > 0 && startup != nil && startup.Heartbeats() != nil {
+		stopKeepAlive()
 		keepAliveC = startup.Heartbeats()
-	} else {
-		var stopKeepAlive func()
-		keepAliveC, stopKeepAlive = NewStreamingKeepAliveTicker(keepAliveInterval)
-		defer stopKeepAlive()
+		stopKeepAlive = func() {}
+		resetKeepAlive = startup.ResetHeartbeat
 	}
+	defer stopKeepAlive()
 
 	var terminalErr *interfaces.ErrorMessage
+	handleChunk := func(chunk []byte, ok bool) bool {
+		if !ok {
+			// Prefer surfacing a terminal error if one is pending.
+			if terminalErr == nil {
+				if errMsg, ok := PendingStreamError(errs); ok {
+					terminalErr = errMsg
+					if opts.NormalizeTerminalError != nil {
+						terminalErr = opts.NormalizeTerminalError(terminalErr)
+					}
+				}
+			}
+			if terminalErr == nil && opts.CloseError != nil {
+				terminalErr = opts.CloseError()
+			} else if terminalErr == nil && startup != nil {
+				terminalErr, _ = startup.PendingCloseError(nil)
+			}
+			if terminalErr != nil {
+				recordFailure(terminalErr)
+				if opts.WriteTerminalError != nil {
+					opts.WriteTerminalError(terminalErr)
+				}
+				if !flush() {
+					return true
+				}
+				cancel(terminalErr.Error)
+				return true
+			}
+			if opts.WriteDone != nil {
+				opts.WriteDone()
+			}
+			if !flush() {
+				return true
+			}
+			cancel(nil)
+			return true
+		}
+		beforeSize := c.Writer.Size()
+		writeChunk(chunk)
+		if c.Writer.Size() > beforeSize {
+			resetKeepAlive()
+		}
+		if !flush() {
+			return true
+		}
+		if startup != nil {
+			startup.Observe(chunk)
+		}
+		if opts.ChunkError != nil {
+			chunkErr := opts.ChunkError()
+			if chunkErr != nil {
+				if opts.NormalizeTerminalError != nil {
+					chunkErr = opts.NormalizeTerminalError(chunkErr)
+				}
+				if chunkErr != nil {
+					recordFailure(chunkErr)
+					cancel(chunkErr.Error)
+				} else {
+					cancel(nil)
+				}
+				return true
+			}
+		}
+		if opts.ChunkDone != nil && opts.ChunkDone() {
+			cancel(nil)
+			return true
+		}
+		return false
+	}
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
@@ -191,66 +260,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			cancel(terminalErr.Error)
 			return
 		case chunk, ok := <-data:
-			if !ok {
-				// Prefer surfacing a terminal error if one is pending.
-				if terminalErr == nil {
-					if errMsg, ok := PendingStreamError(errs); ok {
-						terminalErr = errMsg
-						if opts.NormalizeTerminalError != nil {
-							terminalErr = opts.NormalizeTerminalError(terminalErr)
-						}
-					}
-				}
-				if terminalErr == nil && startup != nil {
-					terminalErr, _ = startup.PendingCloseError(nil)
-				}
-				if terminalErr == nil && opts.CloseError != nil {
-					terminalErr = opts.CloseError()
-				}
-				if terminalErr != nil {
-					recordFailure(terminalErr)
-					if opts.WriteTerminalError != nil {
-						opts.WriteTerminalError(terminalErr)
-					}
-					if !flush() {
-						return
-					}
-					cancel(terminalErr.Error)
-					return
-				}
-				if opts.WriteDone != nil {
-					opts.WriteDone()
-				}
-				if !flush() {
-					return
-				}
-				cancel(nil)
-				return
-			}
-			writeChunk(chunk)
-			if !flush() {
-				return
-			}
-			if startup != nil {
-				startup.Observe(chunk)
-			}
-			if opts.ChunkError != nil {
-				chunkErr := opts.ChunkError()
-				if chunkErr != nil {
-					if opts.NormalizeTerminalError != nil {
-						chunkErr = opts.NormalizeTerminalError(chunkErr)
-					}
-					if chunkErr != nil {
-						recordFailure(chunkErr)
-						cancel(chunkErr.Error)
-					} else {
-						cancel(nil)
-					}
-					return
-				}
-			}
-			if opts.ChunkDone != nil && opts.ChunkDone() {
-				cancel(nil)
+			if handleChunk(chunk, ok) {
 				return
 			}
 		case errMsg, ok := <-errs:
