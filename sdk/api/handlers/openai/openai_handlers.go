@@ -9,12 +9,12 @@ package openai
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
@@ -504,6 +504,11 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 				cliCancel(errWrite)
 				return
 			}
+		case <-startup.WaitHeartbeats():
+			if errWrite := startup.WriteWaitHeartbeat(); errWrite != nil {
+				cliCancel(errWrite)
+				return
+			}
 		case <-c.Request.Context().Done():
 			cliCancel(c.Request.Context().Err())
 			return
@@ -637,6 +642,11 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			return
 		case <-startup.Heartbeats():
 			if errWrite := startup.WriteHeartbeat(); errWrite != nil {
+				cliCancel(errWrite)
+				return
+			}
+		case <-startup.WaitHeartbeats():
+			if errWrite := startup.WriteWaitHeartbeat(); errWrite != nil {
 				cliCancel(errWrite)
 				return
 			}

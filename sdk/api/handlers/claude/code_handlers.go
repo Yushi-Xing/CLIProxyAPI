@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
@@ -262,6 +262,11 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 			return
 		case <-startup.Heartbeats():
 			if errWrite := startup.WriteHeartbeat(); errWrite != nil {
+				cliCancel(errWrite)
+				return
+			}
+		case <-startup.WaitHeartbeats():
+			if errWrite := startup.WriteWaitHeartbeat(); errWrite != nil {
 				cliCancel(errWrite)
 				return
 			}

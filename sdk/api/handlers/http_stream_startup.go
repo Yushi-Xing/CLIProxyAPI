@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
@@ -63,6 +64,9 @@ type HTTPStreamStartup struct {
 	stopHeartbeat  func()
 	resetHeartbeat func()
 	ticks          <-chan time.Time
+	waitTicks      <-chan time.Time
+	canWriteWait   func() bool
+	stopWait       func()
 	timer          *time.Timer
 	timeout        <-chan time.Time
 	wait           time.Duration
@@ -86,6 +90,11 @@ func (h *BaseAPIHandler) PrepareHTTPStream(c *gin.Context, ctx context.Context, 
 	// Initialize shared trace state before copying the Gin request. The callback
 	// stores only into its synchronized state and never retains a response writer.
 	_ = logging.GinCPATraceIDCallback(c)
+	if sse && !(StreamingSendKeepAliveBeforeFT(cfg) && StreamingKeepAliveInterval(cfg) > 0) && h.HasSchedulerContinuity() {
+		signal := newContinuityWaitSignal()
+		c.Set(continuityWaitSignalContextKey, signal)
+		ctx = coreexecutor.WithContinuityWaitObserver(ctx, signal)
+	}
 	snapshot := c.Copy()
 	ctx = context.WithValue(ctx, httpStreamContextKey{}, true)
 	ctx = context.WithValue(ctx, "gin", snapshot)
@@ -102,6 +111,9 @@ func (h *BaseAPIHandler) PrepareHTTPStream(c *gin.Context, ctx context.Context, 
 	s.timeout = s.timer.C
 	if sse && StreamingSendKeepAliveBeforeFT(cfg) {
 		s.ticks, s.stopHeartbeat, s.resetHeartbeat = NewStreamingKeepAliveTickerWithReset(StreamingKeepAliveInterval(cfg))
+	}
+	if sse {
+		s.waitTicks, s.canWriteWait, s.stopWait = h.StartContinuityWaitKeepAliveForPeek(c, s.ticks)
 	}
 	c.Set(httpStreamStartupKey, s)
 	return ctx, s, func(params ...interface{}) {
@@ -148,6 +160,7 @@ func (s *HTTPStreamStartup) PendingCloseError(errs <-chan *interfaces.ErrorMessa
 // an entrypoint returns early. Snapshot logs can safely outlive Gin recycling.
 func (s *HTTPStreamStartup) Close() {
 	s.timer.Stop()
+	s.StopWaitHeartbeats()
 	if s.stopHeartbeat != nil {
 		s.stopHeartbeat()
 	}
@@ -224,6 +237,11 @@ func (s *HTTPStreamStartup) Execute(run func(context.Context) (<-chan []byte, ht
 				s.cancel(err)
 				return s.errorChannels(err)
 			}
+		case <-s.waitTicks:
+			if err := s.WriteWaitHeartbeat(); err != nil {
+				s.cancel(err)
+				return s.errorChannels(err)
+			}
 		}
 	}
 }
@@ -235,7 +253,21 @@ func (s *HTTPStreamStartup) errorChannels(err error) (<-chan []byte, http.Header
 	return nil, nil, errs
 }
 
-func (s *HTTPStreamStartup) Heartbeats() <-chan time.Time { return s.ticks }
+func (s *HTTPStreamStartup) Heartbeats() <-chan time.Time     { return s.ticks }
+func (s *HTTPStreamStartup) WaitHeartbeats() <-chan time.Time { return s.waitTicks }
+func (s *HTTPStreamStartup) WriteWaitHeartbeat() error {
+	if s.canWriteWait != nil && s.canWriteWait() {
+		return s.WriteHeartbeat()
+	}
+	return nil
+}
+func (s *HTTPStreamStartup) StopWaitHeartbeats() {
+	if s.stopWait != nil {
+		s.stopWait()
+		s.stopWait = nil
+		s.waitTicks = nil
+	}
+}
 func (s *HTTPStreamStartup) ResetHeartbeat() {
 	if s.resetHeartbeat != nil {
 		s.resetHeartbeat()

@@ -102,6 +102,23 @@ func TestHTTPStreamStartupHeartbeatDoesNotConsumeBudgetOrLateHeaders(t *testing.
 	}
 }
 
+func TestHTTPStreamStartupContinuityHeartbeatKeepsFirstOutputDeadline(t *testing.T) {
+	s, r := testHTTPStartup(t, "openai", true)
+	deadline := s.Timeout()
+	active := false
+	s.canWriteWait = func() bool { return active }
+	if err := s.WriteWaitHeartbeat(); err != nil || r.Body.Len() != 0 {
+		t.Fatalf("inactive wait wrote heartbeat: body=%q err=%v", r.Body.String(), err)
+	}
+	active = true
+	if err := s.WriteWaitHeartbeat(); err != nil {
+		t.Fatal(err)
+	}
+	if s.Timeout() != deadline || r.Body.String() != ": keep-alive\n\n" {
+		t.Fatalf("continuity heartbeat changed deadline or body: %q", r.Body.String())
+	}
+}
+
 func TestHTTPStreamStartupTimeoutDuringSynchronousExecute(t *testing.T) {
 	for _, heartbeat := range []bool{false, true} {
 		t.Run(map[bool]string{false: "HTTP504", true: "SSEerror"}[heartbeat], func(t *testing.T) {

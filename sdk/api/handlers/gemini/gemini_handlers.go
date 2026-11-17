@@ -219,6 +219,11 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 				cliCancel(errWrite)
 				return
 			}
+		case <-startup.WaitHeartbeats():
+			if errWrite := startup.WriteWaitHeartbeat(); errWrite != nil {
+				cliCancel(errWrite)
+				return
+			}
 		case <-c.Request.Context().Done():
 			cliCancel(c.Request.Context().Err())
 			return

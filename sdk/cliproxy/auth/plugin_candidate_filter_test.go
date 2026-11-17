@@ -282,6 +282,33 @@ func TestPluginCandidateFilterQuotaAffinityRecheckFailsClosed(t *testing.T) {
 	}
 }
 
+func TestPluginCandidateFilterNeverRebindsOnTransientFailure(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mixed=%v", mixed), func(t *testing.T) {
+			affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+				Fallback: &FillFirstSelector{}, TTL: time.Hour, RebindOn: SessionAffinityRebindOnNever,
+			})
+			defer affinity.Stop()
+			fixture := newCandidateFilterFixture(t, affinity, mixed)
+			opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "never-rebind-session"}}
+			first, err := fixture.pick(opts, nil)
+			if err != nil || first == nil || first.ID != "filter-a" {
+				t.Fatalf("initial pick=%+v err=%v", first, err)
+			}
+			fixture.manager.MarkResult(context.Background(), Result{AuthID: "filter-a", Model: candidateFilterModel, Error: &Error{HTTPStatus: http.StatusServiceUnavailable}})
+			next, err := fixture.pick(opts, nil)
+			if err == nil || next != nil {
+				t.Fatalf("transient failure rebound to %+v, err=%v", next, err)
+			}
+			fixture.manager.MarkResult(context.Background(), Result{AuthID: "filter-a", Model: candidateFilterModel, Success: true})
+			recovered, err := fixture.pick(opts, nil)
+			if err != nil || recovered == nil || recovered.ID != "filter-a" {
+				t.Fatalf("recovered pick=%+v err=%v", recovered, err)
+			}
+		})
+	}
+}
+
 func TestPluginCandidateFilterSelectionIDPreserved(t *testing.T) {
 	for _, mixed := range []bool{false, true} {
 		fixture := newCandidateFilterFixture(t, &FillFirstSelector{}, mixed)
